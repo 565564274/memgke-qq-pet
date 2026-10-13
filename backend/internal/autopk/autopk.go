@@ -39,7 +39,10 @@ type Config struct {
 	Enabled      bool   `json:"enabled"`
 	TargetStarts int64  `json:"target_starts"`
 	StartTime    string `json:"start_time"`
+	PreferredFriends []PreferredFriend `json:"preferred_friends"`
 }
+
+type PreferredFriend struct { UserID string `json:"user_id"`; PetID string `json:"pet_id"` }
 
 type State struct {
 	Running            bool   `json:"running"`
@@ -87,6 +90,8 @@ type worker struct {
 	dailyFinished bool
 	needsInternal bool
 	internalPetID int64
+	strangerCursor string
+	strangerExhausted bool
 }
 
 type inflight struct {
@@ -108,6 +113,7 @@ type candidate struct {
 	Power        int64
 	DominantType int64
 	Count        int64
+	Friend       bool
 }
 
 func NewScheduler(db *sql.DB, client Client, logger *slog.Logger) *Scheduler {
@@ -288,6 +294,8 @@ func (s *Scheduler) runBindingWorker(ctx context.Context, bindingID int64, qq st
 		item.dailyFinished = false
 		item.needsInternal = true
 		item.internalPetID = 0
+		item.strangerCursor = ""
+		item.strangerExhausted = false
 	}
 	if item.dailyFinished {
 		return true
@@ -368,7 +376,7 @@ func (s *Scheduler) runBindingWorker(ctx context.Context, bindingID int64, qq st
 		s.fail(bindingID, "profile", "自身宠物资料或战力不完整", err)
 		return true
 	}
-	if item.needsInternal {
+	if item.needsInternal && len(config.PreferredFriends) == 0 {
 		var targetID int64
 		var targetQQ, targetPetID string
 		err := s.db.QueryRowContext(ctx, `SELECT id, user_id, pet_id FROM pet_auto_pk_internal_pets WHERE id > ? ORDER BY id LIMIT 1`, item.internalPetID).Scan(&targetID, &targetQQ, &targetPetID)
@@ -393,6 +401,7 @@ func (s *Scheduler) runBindingWorker(ctx context.Context, bindingID int64, qq st
 		}
 		item.needsInternal = false
 	}
+	if len(config.PreferredFriends) > 0 { item.needsInternal = false }
 	candidates, err := s.loadCandidates(ctx, bindingID)
 	if err != nil {
 		s.fail(bindingID, "candidates", "PK 候选读取失败", err)
@@ -421,10 +430,10 @@ func (s *Scheduler) runBindingWorker(ctx context.Context, bindingID int64, qq st
 			continue
 		}
 		now := timeutil.Now()
-		if _, err := s.db.ExecContext(ctx, "UPDATE pet_pk_strangers SET power = ?, dominant_type = ?, power_updated_at = ?, updated_at = ? WHERE id = ?", power, dominantType, now, now, candidate.ID); err != nil {
+		if candidate.ID > 0 { if _, err := s.db.ExecContext(ctx, "UPDATE pet_pk_strangers SET power = ?, dominant_type = ?, power_updated_at = ?, updated_at = ? WHERE id = ?", power, dominantType, now, now, candidate.ID); err != nil {
 			s.fail(bindingID, "power_save", "对手实时战力保存失败", err)
 			return true
-		}
+		} }
 		selfFinalPower := effectivePower(selfPower.Int64, selfType.Int64, dominantType)
 		opponentFinalPower := effectivePower(power, dominantType, selfType.Int64)
 		if selfFinalPower <= opponentFinalPower {
@@ -456,6 +465,11 @@ func (s *Scheduler) runBindingWorker(ctx context.Context, bindingID int64, qq st
 		s.recordWithPower(bindingID, "start", candidate.UserID, candidate.PetID, power, true, "PK start 成功", details)
 		return true
 	}
+	if !item.strangerExhausted {
+		more, fetchErr := s.fetchNextStrangerPage(ctx, bindingID, selfID, item)
+		if fetchErr != nil { s.record(bindingID, "candidates", "0", "", false, "获取下一页陌生人失败", fetchErr.Error()); return true }
+		if more { return true }
+	}
 	item.rounds++
 	if item.rounds < 3 {
 		return true
@@ -465,8 +479,46 @@ func (s *Scheduler) runBindingWorker(ctx context.Context, bindingID int64, qq st
 	return true
 }
 
+func (s *Scheduler) fetchNextStrangerPage(ctx context.Context, bindingID, selfID int64, item *worker) (bool, error) {
+	client, ok := s.client.(interface { GetPetPKStrangers(context.Context, int64, string, int64) (json.RawMessage, error) })
+	if !ok { item.strangerExhausted = true; return false, nil }
+	raw, err := client.GetPetPKStrangers(ctx, selfID, item.strangerCursor, 4)
+	if err != nil { return false, err }
+	var root any
+	if json.Unmarshal(raw, &root) != nil { return false, errors.New("陌生人目录格式无效") }
+	payload := root
+	if obj, ok := root.(map[string]any); ok { if child, exists := obj["data"]; exists { payload = child } }
+	obj, _ := payload.(map[string]any)
+	if obj == nil { return false, errors.New("陌生人目录缺少分页信息") }
+	entries, _ := obj["friends"].([]any)
+	for _, value := range entries {
+		friend, ok := value.(map[string]any); if !ok { continue }
+		userID, petID := strings.TrimSpace(fmt.Sprint(friend["user_id"])), strings.TrimSpace(fmt.Sprint(friend["pet_id"]))
+		if userID == "" || petID == "" { continue }
+		encoded, _ := json.Marshal(friend)
+		_, _ = s.db.ExecContext(ctx, `INSERT INTO pet_pk_strangers(user_id,pet_id,pet_name,nickname,raw_data,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET pet_id=excluded.pet_id,pet_name=excluded.pet_name,nickname=excluded.nickname,raw_data=excluded.raw_data,updated_at=excluded.updated_at`, userID, petID, fmt.Sprint(friend["pet_name"]), fmt.Sprint(friend["nickname"]), string(encoded), timeutil.Now())
+	}
+	next := strings.TrimSpace(fmt.Sprint(obj["next_cursor"]))
+	hasMore, _ := obj["has_more"].(bool)
+	if !hasMore || next == "" || next == item.strangerCursor { item.strangerExhausted = true; return false, nil }
+	item.strangerCursor = next
+	return true, nil
+}
+
 func (s *Scheduler) loadCandidates(ctx context.Context, bindingID int64) ([]candidate, error) {
 	today := timeutil.Current().Format("2006-01-02")
+	cfg, err := LoadConfig(ctx, s.db, bindingID)
+	if err != nil { return nil, err }
+	items := make([]candidate, 0)
+	preferred := make(map[string]bool, len(cfg.PreferredFriends))
+	for _, friend := range cfg.PreferredFriends {
+		userID, petID := strings.TrimSpace(friend.UserID), strings.TrimSpace(friend.PetID)
+		if userID == "" || petID == "" || preferred[userID] { continue }
+		preferred[userID] = true
+		var count int64
+		if err := s.db.QueryRowContext(ctx, "SELECT COALESCE(start_count,0) FROM pet_auto_pk_daily_opponents WHERE qq_binding_id=? AND opponent_user_id=? AND run_date=?", bindingID, userID, today).Scan(&count); err != nil && !errors.Is(err, sql.ErrNoRows) { return nil, err }
+		items = append(items, candidate{UserID:userID, PetID:petID, Count:count, Friend:true})
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT s.id, s.user_id, s.pet_id, COALESCE(d.start_count, 0)
 		FROM pet_pk_strangers s
 		LEFT JOIN pet_auto_pk_daily_opponents d ON d.qq_binding_id = ? AND d.opponent_user_id = s.user_id AND d.run_date = ?
@@ -475,18 +527,25 @@ func (s *Scheduler) loadCandidates(ctx context.Context, bindingID int64) ([]cand
 		return nil, err
 	}
 	defer rows.Close()
-	items := make([]candidate, 0)
 	for rows.Next() {
 		var item candidate
 		if err := rows.Scan(&item.ID, &item.UserID, &item.PetID, &item.Count); err != nil {
 			return nil, err
 		}
-		items = append(items, item)
+		if !preferred[item.UserID] { items = append(items, item) }
 	}
 	return items, rows.Err()
 }
 
 func rotateCandidates(items []candidate, last string) []candidate {
+	preferred := make([]candidate, 0, len(items))
+	strangers := make([]candidate, 0, len(items))
+	for _, item := range items { if item.Friend { preferred = append(preferred, item) } else { strangers = append(strangers, item) } }
+	items = append(preferred, rotateStrangers(strangers, last)...)
+	return items
+}
+
+func rotateStrangers(items []candidate, last string) []candidate {
 	if len(items) < 2 || last == "" {
 		return items
 	}
@@ -864,19 +923,22 @@ func (s *Scheduler) recordWithPower(bindingID int64, action, opponentUserID, opp
 func LoadConfig(ctx context.Context, db *sql.DB, bindingID int64) (Config, error) {
 	var config Config
 	var enabled int
-	err := db.QueryRowContext(ctx, "SELECT enabled, target_starts, COALESCE(start_time, '00:00') FROM pet_auto_pk_configs WHERE qq_binding_id = ?", bindingID).Scan(&enabled, &config.TargetStarts, &config.StartTime)
+	var preferredJSON string
+	err := db.QueryRowContext(ctx, "SELECT enabled, target_starts, COALESCE(start_time, '00:00'), COALESCE(preferred_friends_json, '[]') FROM pet_auto_pk_configs WHERE qq_binding_id = ?", bindingID).Scan(&enabled, &config.TargetStarts, &config.StartTime, &preferredJSON)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Config{TargetStarts: 10, StartTime: "01:00"}, nil
+		return Config{TargetStarts: 10, StartTime: "01:00", PreferredFriends: []PreferredFriend{}}, nil
 	}
 	if config.StartTime == "" {
 		config.StartTime = "00:00"
 	}
 	config.Enabled = enabled == 1
+	if json.Unmarshal([]byte(preferredJSON), &config.PreferredFriends) != nil { config.PreferredFriends = []PreferredFriend{} }
 	return config, err
 }
 
 func SaveConfig(ctx context.Context, db *sql.DB, bindingID int64, config Config) error {
-	_, err := db.ExecContext(ctx, `INSERT INTO pet_auto_pk_configs (qq_binding_id, enabled, target_starts, start_time, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(qq_binding_id) DO UPDATE SET target_starts = excluded.target_starts, start_time = excluded.start_time, updated_at = excluded.updated_at`, bindingID, boolInt(config.Enabled), config.TargetStarts, config.StartTime, timeutil.Now())
+	encoded, err := json.Marshal(config.PreferredFriends); if err != nil { return err }
+	_, err = db.ExecContext(ctx, `INSERT INTO pet_auto_pk_configs (qq_binding_id, enabled, target_starts, start_time, preferred_friends_json, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(qq_binding_id) DO UPDATE SET target_starts = excluded.target_starts, start_time = excluded.start_time, preferred_friends_json=excluded.preferred_friends_json, updated_at = excluded.updated_at`, bindingID, boolInt(config.Enabled), config.TargetStarts, config.StartTime, string(encoded), timeutil.Now())
 	return err
 }
 

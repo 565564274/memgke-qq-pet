@@ -236,6 +236,7 @@ CREATE TABLE IF NOT EXISTS pet_auto_pk_configs (
     enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
     target_starts INTEGER NOT NULL DEFAULT 10 CHECK (target_starts >= 0),
     start_time TEXT NOT NULL DEFAULT '01:00',
+    preferred_friends_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (qq_binding_id) REFERENCES qq_bindings(id) ON DELETE CASCADE
@@ -442,6 +443,7 @@ func Migrate(db *sql.DB) error {
 		"ALTER TABLE pet_profiles ADD COLUMN pk_updated_at TEXT",
 		"ALTER TABLE pet_auto_pk_logs ADD COLUMN opponent_power INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE pet_auto_pk_configs ADD COLUMN start_time TEXT NOT NULL DEFAULT '00:00'",
+		"ALTER TABLE pet_auto_pk_configs ADD COLUMN preferred_friends_json TEXT NOT NULL DEFAULT '[]'",
 		"UPDATE pet_auto_pk_configs SET target_starts = 10, start_time = '01:00', updated_at = CURRENT_TIMESTAMP",
 		"ALTER TABLE redeem_codes ADD COLUMN code_ciphertext TEXT",
 		"ALTER TABLE pet_auto_control_configs ADD COLUMN auto_feed_enabled INTEGER NOT NULL DEFAULT 0",

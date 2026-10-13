@@ -76,6 +76,9 @@ type PlanItem struct {
 	WorkCareerType   *int64 `json:"work_career_type,omitempty"`
 	WorkOption       string `json:"work_option,omitempty"`
 	WorkSubEventType *int64 `json:"work_sub_event_type,omitempty"`
+	StartTime        string `json:"start_time,omitempty"`
+	WorkFriendQQ     string `json:"work_friend_qq,omitempty"`
+	WorkFriendPetID  string `json:"work_friend_pet_id,omitempty"`
 	ExecutedCount    int64  `json:"executed_count"`
 	ExecutedSeconds  int64  `json:"executed_seconds"`
 	Completed        bool   `json:"completed"`
@@ -473,6 +476,10 @@ func (s *Scheduler) runBinding(parent context.Context, bindingID int64, qq strin
 		s.updateState(bindingID, false, "", "", "今日计划已完成", "complete", "")
 		return
 	}
+	if strings.TrimSpace(item.StartTime) != "" && !planStartTimeReached(item.StartTime, timeutil.Current()) {
+		s.updateState(bindingID, false, "", "", "等待计划开始时间："+item.StartTime, "waiting", "")
+		return
+	}
 	activity := item.Activity
 	option, subEventType, saved := savedWorkOption(item)
 	var optionsData []byte
@@ -500,7 +507,16 @@ func (s *Scheduler) runBinding(parent context.Context, bindingID int64, qq strin
 			return
 		}
 	}
-	result, err := s.client.StartPetActivity(ctx, selfID, petID, activity, option, subEventType)
+	var result []byte
+	if activity == "work" && strings.TrimSpace(item.WorkFriendQQ) != "" && strings.TrimSpace(item.WorkFriendPetID) != "" {
+		if starter, ok := s.client.(interface { StartPetActivityForFriend(context.Context, int64, string, string, string, int64, string, string) (json.RawMessage, error) }); ok {
+			result, err = starter.StartPetActivityForFriend(ctx, selfID, petID, activity, option, subEventType, item.WorkFriendQQ, item.WorkFriendPetID)
+		} else {
+			err = errors.New("当前听雨客户端不支持好友宠物打工")
+		}
+	} else {
+		result, err = s.client.StartPetActivity(ctx, selfID, petID, activity, option, subEventType)
+	}
 	// #region debug-point AC-06:start-activity-result
 	startError := ""
 	if err != nil {
@@ -550,6 +566,11 @@ func (s *Scheduler) runBinding(parent context.Context, bindingID int64, qq strin
 		_, err = s.client.EncouragePetActivity(ctx, selfID, petID, storyID)
 		s.record(bindingID, "encourage", activity, option, err == nil, resultMessage(err, "活动开始后已发送鼓励"), "")
 	}
+}
+
+func planStartTimeReached(value string, now time.Time) bool {
+	parsed, err := time.Parse("15:04", strings.TrimSpace(value))
+	return err != nil || now.Hour()*60+now.Minute() >= parsed.Hour()*60+parsed.Minute()
 }
 
 func resetDailyConfig(ctx context.Context, db *sql.DB, bindingID int64, today string) error {
@@ -1454,7 +1475,8 @@ func planItemDefinitionEqual(left, right PlanItem) bool {
 		left.LearningTarget == right.LearningTarget &&
 		int64PointersEqual(left.WorkCareerType, right.WorkCareerType) &&
 		left.WorkOption == right.WorkOption &&
-		int64PointersEqual(left.WorkSubEventType, right.WorkSubEventType)
+		int64PointersEqual(left.WorkSubEventType, right.WorkSubEventType) &&
+		left.StartTime == right.StartTime && left.WorkFriendQQ == right.WorkFriendQQ && left.WorkFriendPetID == right.WorkFriendPetID
 }
 
 func int64PointersEqual(left, right *int64) bool {
@@ -1533,10 +1555,19 @@ func SaveConfig(ctx context.Context, db *sql.DB, bindingID int64, config Config)
 			if item.WorkSubEventType == nil {
 				return errors.New("打工项目缺少子事件类型")
 			}
+			item.WorkFriendQQ = strings.TrimSpace(item.WorkFriendQQ)
+			item.WorkFriendPetID = strings.TrimSpace(item.WorkFriendPetID)
+			if (item.WorkFriendQQ == "") != (item.WorkFriendPetID == "") {
+				return errors.New("好友 QQ 和好友宠物 ID 必须同时填写")
+			}
 		} else {
 			item.WorkCareerType = nil
 			item.WorkOption = ""
 			item.WorkSubEventType = nil
+			item.WorkFriendQQ, item.WorkFriendPetID = "", ""
+		}
+		if item.StartTime != "" {
+			if _, err := time.Parse("15:04", item.StartTime); err != nil { return errors.New("计划开始时间格式须为 HH:mm") }
 		}
 		if item.Activity == "school" && strings.TrimSpace(item.LearningTarget) == "" {
 			item.LearningTarget = config.LearningTarget

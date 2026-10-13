@@ -39,10 +39,19 @@ func autoPKConfigHandler(db *sql.DB, update bool) http.HandlerFunc {
 		var input struct {
 			TargetStarts int64  `json:"target_starts"`
 			StartTime    string `json:"start_time"`
+			PreferredFriends []autopk.PreferredFriend `json:"preferred_friends"`
 		}
 		if json.NewDecoder(r.Body).Decode(&input) != nil {
 			response.JSON(w, http.StatusBadRequest, 4003, "自动 PK 配置不合法", nil)
 			return
+		}
+		seenFriends := make(map[string]bool, len(input.PreferredFriends))
+		for _, friend := range input.PreferredFriends {
+			if strings.TrimSpace(friend.UserID) == "" || strings.TrimSpace(friend.PetID) == "" || seenFriends[strings.TrimSpace(friend.UserID)] {
+				response.JSON(w, http.StatusBadRequest, 4003, "优先 PK 好友配置不合法", nil)
+				return
+			}
+			seenFriends[strings.TrimSpace(friend.UserID)] = true
 		}
 		config, err := autopk.LoadConfig(r.Context(), db, bindingID)
 		if err != nil {
@@ -52,6 +61,7 @@ func autoPKConfigHandler(db *sql.DB, update bool) http.HandlerFunc {
 		// 自动 PK 的次数和开始时间由系统固定，客户端只负责保存兼容请求。
 		config.TargetStarts = 10
 		config.StartTime = "01:00"
+		config.PreferredFriends = input.PreferredFriends
 		if err := autopk.SaveConfig(r.Context(), db, bindingID, config); err != nil {
 			response.JSON(w, http.StatusBadRequest, 4003, err.Error(), nil)
 			return
@@ -78,7 +88,10 @@ func autoPKStartHandler(db *sql.DB, scheduler *autopk.Scheduler) http.HandlerFun
 			return
 		}
 		// 自动 PK 的执行策略由系统统一固定，用户端只控制启停。
-		if err := autopk.SaveConfig(r.Context(), db, bindingID, autopk.Config{Enabled: true, TargetStarts: 10, StartTime: "01:00"}); err != nil {
+		config, loadErr := autopk.LoadConfig(r.Context(), db, bindingID)
+		if loadErr != nil { response.JSON(w, http.StatusInternalServerError, 9002, "自动 PK 配置读取失败", nil); return }
+		config.Enabled, config.TargetStarts, config.StartTime = true, 10, "01:00"
+		if err := autopk.SaveConfig(r.Context(), db, bindingID, config); err != nil {
 			response.JSON(w, http.StatusInternalServerError, 9002, "自动 PK 配置保存失败", nil)
 			return
 		}

@@ -464,6 +464,11 @@ func (c *Client) GetBotInfo(ctx context.Context, selfID int64) (json.RawMessage,
 func (c *Client) GetFriendList(ctx context.Context, selfID int64) (json.RawMessage, error) {
 	return c.Action(ctx, "get_friend_list", map[string]any{"self_id": selfID})
 }
+func (c *Client) GetPetPKFriends(ctx context.Context, selfID int64, cursor string) (json.RawMessage, error) {
+	p := map[string]any{"self_id": selfID, "client_type": "android"}
+	if cursor != "" { p["cursor"] = cursor }
+	return c.Action(ctx, "get_pet_pk_friends", p)
+}
 
 func (c *Client) GetFriendPetProfile(ctx context.Context, selfID int64, friendUIN, petID string) (json.RawMessage, error) {
 	params := map[string]any{"self_id": selfID, "client_type": "android", "friend_uin": friendUIN}
@@ -540,6 +545,9 @@ func (c *Client) GetPetActivityOptions(ctx context.Context, selfID int64, petID,
 }
 func (c *Client) StartPetActivity(ctx context.Context, selfID int64, petID, activity, optionName string, subEventType int64) (json.RawMessage, error) {
 	return c.Action(ctx, "start_pet_activity", map[string]any{"self_id": selfID, "client_type": "android", "pet_id": petID, "activity": activity, "option_name": optionName, "sub_event_type": subEventType})
+}
+func (c *Client) StartPetActivityForFriend(ctx context.Context, selfID int64, petID, activity, optionName string, subEventType int64, friendUIN, friendPetID string) (json.RawMessage, error) {
+	return c.Action(ctx, "start_pet_activity", map[string]any{"self_id": selfID, "client_type": "android", "pet_id": petID, "activity": activity, "option_name": optionName, "sub_event_type": subEventType, "friend_uin": friendUIN, "friend_pet_id": friendPetID})
 }
 func (c *Client) GetPetActivityStatus(ctx context.Context, selfID int64, petID string) (json.RawMessage, error) {
 	return c.Action(ctx, "get_pet_activity_status", map[string]any{"self_id": selfID, "client_type": "android", "pet_id": petID})

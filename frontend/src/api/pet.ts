@@ -128,6 +128,7 @@ export interface AutoPKConfig {
   enabled: boolean
   target_starts: number
   start_time: string
+  preferred_friends: { user_id: string; pet_id: string }[]
 }
 
 export interface AutoPKState {
@@ -260,6 +261,9 @@ export interface PetAutoControlPlanItem {
   work_career_type?: number
   work_option?: string
   work_sub_event_type?: number
+  start_time?: string
+  work_friend_qq?: string
+  work_friend_pet_id?: string
   executed_count: number
   executed_seconds: number
   completed: boolean
@@ -385,7 +389,7 @@ export const startPetPK = (qq: string, friendID: string, friendPetID: string) =>
 export const getPetPKStatus = (qq: string, storyID: string) => get<PetPKStatusResult>(`/api/pets/${encodeURIComponent(qq)}/pk-status?story_id=${encodeURIComponent(storyID)}`)
 export const settlePetPK = (qq: string, storyID: string) => post<PetPKStatusResult>(`/api/pets/${encodeURIComponent(qq)}/pk-settle`, { story_id: storyID })
 export const getAutoPKConfig = (qq: string) => get<AutoPKConfig>(`/api/pets/${encodeURIComponent(qq)}/auto-pk/config`)
-export const updateAutoPKConfig = (qq: string, targetStarts: number, startTime = '00:00') => put<AutoPKConfig>(`/api/pets/${encodeURIComponent(qq)}/auto-pk/config`, { target_starts: targetStarts, start_time: startTime })
+export const updateAutoPKConfig = (qq: string, targetStarts: number, startTime = '00:00', preferredFriends: { user_id: string; pet_id: string }[] = []) => put<AutoPKConfig>(`/api/pets/${encodeURIComponent(qq)}/auto-pk/config`, { target_starts: targetStarts, start_time: startTime, preferred_friends: preferredFriends })
 export const startAutoPK = (qq: string) => post<AutoPKState>(`/api/pets/${encodeURIComponent(qq)}/auto-pk/start`)
 export const stopAutoPK = (qq: string) => post<AutoPKState>(`/api/pets/${encodeURIComponent(qq)}/auto-pk/stop`)
 export const getAutoPKState = (qq: string) => get<AutoPKState>(`/api/pets/${encodeURIComponent(qq)}/auto-pk/state`)
