@@ -384,7 +384,34 @@ func (c *Client) Action(ctx context.Context, action string, params map[string]an
 		}
 		return nil, fmt.Errorf("听雨框架 action 失败: code=%d %s", max(reply.Retcode, reply.ErrorCode), message)
 	}
+	if err := nestedActionError(reply.Data); err != nil {
+		return nil, err
+	}
 	return reply.Data, nil
+}
+
+// Some 听雨 actions return a successful transport frame whose data contains
+// another action_result frame. Treat a failed inner result as an action error
+// so callers do not report business failures as successful operations.
+func nestedActionError(data json.RawMessage) error {
+	var result actionResponse
+	if len(data) == 0 || json.Unmarshal(data, &result) != nil {
+		return nil
+	}
+	if result.Type != "action_result" && result.OK == nil {
+		return nil
+	}
+	if result.OK != nil && !*result.OK || result.Status != "" && result.Status != "ok" || result.Retcode != 0 || result.ErrorCode != 0 {
+		message := result.Message
+		if message == "" {
+			message = result.Error
+		}
+		if message == "" {
+			message = string(data)
+		}
+		return fmt.Errorf("听雨框架 action 失败: code=%d %s", max(result.Retcode, result.ErrorCode), message)
+	}
+	return nil
 }
 
 func (c *Client) RawAction(ctx context.Context, action string, params map[string]any) (json.RawMessage, error) {

@@ -384,7 +384,12 @@ body { margin: 0; min-width: 320px; background: radial-gradient(circle at 12% 8%
 .pet-auto-control-work-options .pet-activity-option.is-selected { border-color: #6079b2; background: rgba(232, 237, 247, .88); box-shadow: 0 0 0 1px rgba(96, 121, 178, .16); }
 .pet-auto-control-work-options .el-radio { flex: 0 0 auto; margin-right: 0; }
 .pet-auto-control-logs { display: grid; max-height: 500px; gap: 8px; overflow-y: auto; }
-.pet-auto-control-log { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 8px; align-items: center; padding: 8px 10px; border-radius: 8px; background: #fff; }
+.pet-auto-control-log { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 8px; align-items: start; padding: 8px 10px; border-radius: 8px; background: #fff; }
+.pet-auto-control-log-main { display: grid; min-width: 0; gap: 4px; overflow-wrap: anywhere; }
+.pet-auto-control-log-main > span { color: #475569; font-size: 13px; }
+.pet-auto-control-log details { color: #64748b; font-size: 12px; }
+.pet-auto-control-log summary { width: fit-content; cursor: pointer; }
+.pet-auto-control-log pre { max-height: 240px; margin: 6px 0 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: #334155; font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .pet-auto-control-log small { grid-column: 2; color: #94a3b8; overflow-wrap: anywhere; }
 .pet-auto-control-save-bar { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 16px 18px; border: 1px solid rgba(96, 121, 178, .3); border-radius: 12px; background: linear-gradient(135deg, rgba(232, 237, 247, .92), rgba(245, 248, 253, .96)); box-shadow: 0 7px 18px rgba(76, 99, 145, .07); }
 .pet-auto-control-save-bar > div { display: grid; gap: 4px; }
@@ -394,8 +399,8 @@ body { margin: 0; min-width: 320px; background: radial-gradient(circle at 12% 8%
 .pet-auto-control-save-bar .el-button--primary { min-width: 190px; min-height: 48px; color: #fff; font-weight: 700; background: linear-gradient(135deg, #2563eb, #4f46e5); border: 0; box-shadow: 0 8px 18px rgba(37, 99, 235, .28); }
 .pet-auto-control-save-bar .el-button--primary:hover { background: linear-gradient(135deg, #1d4ed8, #4338ca); box-shadow: 0 10px 22px rgba(37, 99, 235, .38); transform: translateY(-1px); }
 .pet-friend-multiselect { width: 100%; margin-top: 10px; }
-.pet-friend-multiselect .el-select__wrapper { max-height: 96px; overflow: hidden; align-items: flex-start; }
-.pet-friend-multiselect .el-select__selection { display: flex; flex-wrap: wrap; }
+.pet-friend-multiselect .el-select__wrapper { min-height: 40px; max-height: 96px; overflow: hidden; align-items: center; }
+.pet-friend-multiselect .el-select__selection { display: flex; flex-wrap: wrap; align-items: center; align-content: center; }
 .pet-auto-poke-friends { display: grid; gap: 4px; margin-top: 12px; }
 .pet-auto-poke-friends > small { color: #64748b; }
 .pet-auto-care-section { padding: 18px; background: linear-gradient(135deg, rgba(250, 251, 253, .88), rgba(244, 247, 252, .72)); }

@@ -252,6 +252,10 @@ func (s *Scheduler) Enable(ctx context.Context, bindingID int64, qq string) erro
 }
 
 func (s *Scheduler) Disable(ctx context.Context, bindingID int64, message string) error {
+	config, err := LoadConfig(ctx, s.db, bindingID)
+	if err != nil {
+		return err
+	}
 	now := timeutil.Now()
 	if _, err := s.db.ExecContext(ctx, "UPDATE pet_auto_pk_configs SET enabled = 0, updated_at = ? WHERE qq_binding_id = ?", now, bindingID); err != nil {
 		return err
@@ -260,7 +264,9 @@ func (s *Scheduler) Disable(ctx context.Context, bindingID int64, message string
 		return err
 	}
 	s.StopBinding(bindingID)
-	s.record(bindingID, "stop_scheduler", "", "", true, message, "")
+	if config.Enabled {
+		s.record(bindingID, "stop_scheduler", "", "", true, message, "scheduler was enabled")
+	}
 	return nil
 }
 
@@ -966,7 +972,7 @@ func LoadLogsByDate(ctx context.Context, db *sql.DB, bindingID int64, limit int,
 	if limit < 1 || limit > 500 {
 		limit = 20
 	}
-	query := "SELECT id, action, opponent_user_id, opponent_pet_id, opponent_power, success, message, details, created_at FROM pet_auto_pk_logs WHERE qq_binding_id = ? AND action = 'start' AND success = 1"
+	query := "SELECT id, action, opponent_user_id, opponent_pet_id, opponent_power, success, message, details, created_at FROM pet_auto_pk_logs WHERE qq_binding_id = ?"
 	args := []any{bindingID}
 	if date != "" { query += " AND substr(created_at,1,10)=?"; args = append(args, date) }
 	query += " ORDER BY id DESC LIMIT ?"
@@ -984,8 +990,6 @@ func LoadLogsByDate(ctx context.Context, db *sql.DB, bindingID int64, limit int,
 			return nil, err
 		}
 		item.Success = success == 1
-		item.Message = "PK已提交"
-		item.Details = ""
 		items = append(items, item)
 	}
 	return items, rows.Err()

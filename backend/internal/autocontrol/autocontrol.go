@@ -394,15 +394,18 @@ func (s *Scheduler) runBinding(parent context.Context, bindingID int64, qq strin
 		s.updateState(bindingID, false, "", "", "每日00点已重置任务次数", "reset", "")
 	}
 	selfID := mustInt64(qq)
-	petID := s.petID(ctx, selfID)
+	petID, profileErr := s.petID(ctx, selfID)
 	if petID == "" {
+		s.record(bindingID, "api_get_pet_profile", "", "", false, "获取宠物资料失败，无法执行自动计划", errorText(profileErr, "响应中没有 pet_id"))
 		return
 	}
+	s.record(bindingID, "api_get_pet_profile", "", "", true, "已查询宠物资料", "pet_id="+petID)
 	statusData, err := s.client.GetPetActivityStatus(ctx, selfID, petID)
 	if err != nil {
-		s.record(bindingID, "status", "", "", false, err.Error(), "")
+		s.record(bindingID, "api_get_pet_activity_status", "", "", false, err.Error(), "pet_id="+petID)
 		return
 	}
+	s.record(bindingID, "api_get_pet_activity_status", "", "", true, "已查询宠物活动状态", string(statusData))
 	status, ok := parseActivityStatus(statusData)
 	if !ok {
 		s.record(bindingID, "status", "", "", false, "活动状态格式无效", string(statusData))
@@ -465,8 +468,8 @@ func (s *Scheduler) runBinding(parent context.Context, bindingID int64, qq strin
 			// #endregion
 			return
 		}
-		_, err = s.client.EncouragePetActivity(ctx, selfID, petID, state.CurrentStoryID)
-		s.record(bindingID, "encourage", currentActivity, state.CurrentOption, err == nil, resultMessage(err, "活动进行中，已发送鼓励"), "")
+		encourageResult, encourageErr := s.client.EncouragePetActivity(ctx, selfID, petID, state.CurrentStoryID)
+		s.record(bindingID, "encourage", currentActivity, state.CurrentOption, encourageErr == nil, resultMessage(encourageErr, "活动进行中，已发送鼓励"), string(encourageResult))
 		return
 	}
 	item, ok := nextPlanItem(config)
@@ -490,18 +493,20 @@ func (s *Scheduler) runBinding(parent context.Context, bindingID int64, qq strin
 		if activity == "work" {
 			overviewData, overviewErr := s.client.GetPetActivityOverview(ctx, selfID, petID, activity)
 			if overviewErr != nil {
-				s.record(bindingID, "overview", activity, "", false, overviewErr.Error(), "")
+				s.record(bindingID, "api_get_pet_activity_overview", activity, "", false, overviewErr.Error(), "pet_id="+petID)
 				return
 			}
+			s.record(bindingID, "api_get_pet_activity_overview", activity, "", true, "已查询打工职业信息", string(overviewData))
 			if number, ok := findNumber(decodeObject(overviewData), "current_career_type"); ok {
 				careerType = int64(number)
 			}
 		}
 		optionsData, err = s.client.GetPetActivityOptions(ctx, selfID, petID, activity, careerType)
 		if err != nil {
-			s.record(bindingID, "options", activity, "", false, err.Error(), "")
+			s.record(bindingID, "api_get_pet_activity_options", activity, "", false, err.Error(), fmt.Sprintf("pet_id=%s career_type=%d", petID, careerType))
 			return
 		}
+		s.record(bindingID, "api_get_pet_activity_options", activity, "", true, "已查询可执行活动项目", string(optionsData))
 		option, subEventType = pickOptionDetails(optionsData, activity, item.LearningTarget, item.WorkOption)
 		if option == "" {
 			s.runPetCare(ctx, bindingID, qq, config)
@@ -513,12 +518,15 @@ func (s *Scheduler) runBinding(parent context.Context, bindingID int64, qq strin
 	friendUin := effectiveFriendUin(item)
 	if activity == "work" && friendUin != "" && strings.TrimSpace(item.WorkFriendPetID) != "" {
 		result, err = s.client.StartPetActivityForFriend(ctx, selfID, petID, activity, option, subEventType, friendUin, item.WorkFriendPetID)
+		s.record(bindingID, "api_start_pet_activity", activity, option, err == nil, resultMessage(err, "已提交打工启动请求（指定好友）"), fmt.Sprintf("friend_uin=%s friend_pet_id=%s response=%s", friendUin, item.WorkFriendPetID, string(result)))
 		if err != nil {
 			s.record(bindingID, "start", activity, option, false, "雇佣好友打工失败，正在改为普通打工重试", err.Error())
 			result, err = s.client.StartPetActivity(ctx, selfID, petID, activity, option, subEventType)
+			s.record(bindingID, "api_start_pet_activity", activity, option, err == nil, resultMessage(err, "已提交普通打工重试请求"), string(result))
 		}
 	} else {
 		result, err = s.client.StartPetActivity(ctx, selfID, petID, activity, option, subEventType)
+		s.record(bindingID, "api_start_pet_activity", activity, option, err == nil, resultMessage(err, "已提交活动启动请求"), string(result))
 	}
 	// #region debug-point AC-06:start-activity-result
 	startError := ""
@@ -566,8 +574,8 @@ func (s *Scheduler) runBinding(parent context.Context, bindingID int64, qq strin
 	sendDebugEvent("AC-08", "autocontrol.runBinding", "activity start recorded", map[string]any{"binding_id": bindingID, "story_id": storyID})
 	// #endregion
 	if activity != "adventure" && config.EncourageProbability > 0 && rand.Int63n(100) < config.EncourageProbability {
-		_, err = s.client.EncouragePetActivity(ctx, selfID, petID, storyID)
-		s.record(bindingID, "encourage", activity, option, err == nil, resultMessage(err, "活动开始后已发送鼓励"), "")
+		result, err := s.client.EncouragePetActivity(ctx, selfID, petID, storyID)
+		s.record(bindingID, "encourage", activity, option, err == nil, resultMessage(err, "活动开始后已发送鼓励"), string(result))
 	}
 }
 
@@ -582,18 +590,8 @@ func resetDailyConfig(ctx context.Context, db *sql.DB, bindingID int64, today st
 }
 
 func ResetDailyPlan(ctx context.Context, db *sql.DB, bindingID int64) error {
-	config, err := LoadConfig(ctx, db, bindingID)
-	if err != nil { return err }
-	today := timeutil.Current().Format("2006-01-02")
-	for i := range config.Plan {
-		config.Plan[i].ExecutedCount = 0
-		config.Plan[i].ExecutedSeconds = 0
-		config.Plan[i].Completed = false
-		config.Plan[i].LastNotifiedDate = ""
-	}
-	if err := savePlanProgress(ctx, db, bindingID, config.Plan); err != nil { return err }
-	if err := resetDailyConfig(ctx, db, bindingID, today); err != nil { return err }
-	_, err = db.ExecContext(ctx, `INSERT INTO pet_auto_control_states (qq_binding_id, running, message, last_action, last_error, updated_at) VALUES (?,0,'已手动重置每日计划','reset','',?) ON CONFLICT(qq_binding_id) DO UPDATE SET running=0,message=excluded.message,last_action='reset',last_error='',updated_at=excluded.updated_at`, bindingID, timeutil.Now())
+	if _, err := db.ExecContext(ctx, `UPDATE pet_auto_control_configs SET plan_json='[]', updated_at=? WHERE qq_binding_id=?`, timeutil.Now(), bindingID); err != nil { return err }
+	_, err := db.ExecContext(ctx, `UPDATE pet_auto_control_states SET message='每日活动计划已清空，当日执行统计保留', last_action='reset_plan', updated_at=? WHERE qq_binding_id=?`, timeutil.Now(), bindingID)
 	return err
 }
 
@@ -816,8 +814,10 @@ func (s *Scheduler) checkBindingReady(ctx context.Context, bindingID int64, qq s
 	}
 	botsData, err := s.client.ListBots(ctx)
 	if err != nil {
+		s.record(bindingID, "api_list_bots", "", "", false, "查询 QQ 在线状态失败", err.Error())
 		return "QQ 服务在线检查失败，自动控制已关闭", err
 	}
+	s.record(bindingID, "api_list_bots", "", "", true, "已查询 QQ 在线状态", string(botsData))
 	var raw any
 	if err := json.Unmarshal(botsData, &raw); err != nil {
 		return "QQ 在线状态格式无效，自动控制已关闭", err
@@ -955,16 +955,17 @@ func (s *Scheduler) runPetCare(ctx context.Context, bindingID int64, qq string, 
 		return false
 	}
 	selfID := mustInt64(qq)
-	petID := s.petID(ctx, selfID)
+	petID, profileErr := s.petID(ctx, selfID)
 	if petID == "" {
-		s.record(bindingID, "vitals", "", "", false, "宠物资料读取失败", "")
+		s.record(bindingID, "api_get_pet_profile", "", "", false, "获取宠物资料失败，无法查询宠物状态", errorText(profileErr, "响应中没有 pet_id"))
 		return true
 	}
 	vitalsData, err := s.client.GetPetVitals(ctx, selfID, petID)
 	if err != nil {
-		s.record(bindingID, "vitals", "", "", false, err.Error(), "")
+		s.record(bindingID, "api_get_pet_vitals", "", "", false, err.Error(), "pet_id="+petID)
 		return true
 	}
+	s.record(bindingID, "api_get_pet_vitals", "", "", true, "已查询宠物状态", string(vitalsData))
 	vitals := decodeObject(vitalsData)
 	if config.AutoFeedEnabled {
 		if hunger, ok := findNumber(vitals, "hunger"); ok && hunger <= float64(config.AutoFeedThreshold) {
@@ -984,9 +985,9 @@ func (s *Scheduler) runPetCare(ctx context.Context, bindingID int64, qq string, 
 
 func (s *Scheduler) feedIfNeeded(ctx context.Context, bindingID int64, qq, food string, hunger float64, threshold int64) bool {
 	selfID := mustInt64(qq)
-	petID := s.petID(ctx, selfID)
+	petID, profileErr := s.petID(ctx, selfID)
 	if petID == "" {
-		s.record(bindingID, "feed", "", food, false, "宠物资料读取失败", "")
+		s.record(bindingID, "api_get_pet_profile", "", food, false, "获取宠物资料失败，无法喂食", errorText(profileErr, "响应中没有 pet_id"))
 		return true
 	}
 	inventory, err := s.client.GetPetFoodCatalog(ctx, selfID)
@@ -994,6 +995,7 @@ func (s *Scheduler) feedIfNeeded(ctx context.Context, bindingID int64, qq, food 
 		s.record(bindingID, "feed_inventory", "", food, false, err.Error(), "")
 		return true
 	}
+	s.record(bindingID, "api_get_pet_food_catalog", "", food, true, "已查询食物目录和库存", string(inventory))
 	stock, found := findItemStock(inventory, food)
 	foodID := findItemID(inventory, food, "food_id")
 	if !found || foodID == "" {
@@ -1008,9 +1010,9 @@ func (s *Scheduler) feedIfNeeded(ctx context.Context, bindingID int64, qq, food 
 		s.record(bindingID, "buy_food", "", food, true, "库存低于 5，已自动购买 20 个", "")
 	}
 	for attempt := 0; attempt < 10 && hunger <= float64(threshold); attempt++ {
-		_, err = s.client.FeedPet(ctx, selfID, petID, foodID)
-		s.record(bindingID, "feed", "", food, err == nil, resultMessage(err, fmt.Sprintf("饥饿值 %.0f，已自动喂食", hunger)), "")
-		if err != nil { return true }
+		result, feedErr := s.client.FeedPet(ctx, selfID, petID, foodID)
+		s.record(bindingID, "feed", "", food, feedErr == nil, resultMessage(feedErr, fmt.Sprintf("饥饿值 %.0f，已自动喂食", hunger)), string(result))
+		if feedErr != nil { return true }
 		vitals, vitalsErr := s.client.GetPetVitals(ctx, selfID, petID)
 		if vitalsErr != nil { s.record(bindingID, "vitals", "", "", false, vitalsErr.Error(), ""); return true }
 		if updated, ok := findNumber(decodeObject(vitals), "hunger"); ok { hunger = updated } else { break }
@@ -1020,9 +1022,9 @@ func (s *Scheduler) feedIfNeeded(ctx context.Context, bindingID int64, qq, food 
 
 func (s *Scheduler) batheIfNeeded(ctx context.Context, bindingID int64, qq, item string, cleanliness float64, threshold int64) bool {
 	selfID := mustInt64(qq)
-	petID := s.petID(ctx, selfID)
+	petID, profileErr := s.petID(ctx, selfID)
 	if petID == "" {
-		s.record(bindingID, "bathe", "", item, false, "宠物资料读取失败", "")
+		s.record(bindingID, "api_get_pet_profile", "", item, false, "获取宠物资料失败，无法洗护", errorText(profileErr, "响应中没有 pet_id"))
 		return true
 	}
 	inventory, err := s.client.GetPetBathInventory(ctx, selfID)
@@ -1030,11 +1032,13 @@ func (s *Scheduler) batheIfNeeded(ctx context.Context, bindingID int64, qq, item
 		s.record(bindingID, "bath_inventory", "", item, false, err.Error(), "")
 		return true
 	}
+	s.record(bindingID, "api_get_pet_bath_inventory", "", item, true, "已查询洗护用品库存", string(inventory))
 	catalog, err := s.client.GetPetBathCatalog(ctx, selfID)
 	if err != nil {
 		s.record(bindingID, "bath_catalog", "", item, false, err.Error(), "")
 		return true
 	}
+	s.record(bindingID, "api_get_pet_bath_catalog", "", item, true, "已查询洗护用品目录", string(catalog))
 	itemID := findItemID(catalog, item, "item_id")
 	if itemID == "" {
 		s.record(bindingID, "bath_catalog", "", item, false, "洗护目录中未找到目标物品或 item_id", string(catalog))
@@ -1053,9 +1057,9 @@ func (s *Scheduler) batheIfNeeded(ctx context.Context, bindingID int64, qq, item
 		s.record(bindingID, "buy_bath", "", item, true, "库存低于 5，已自动购买 20 个", "")
 	}
 	for attempt := 0; attempt < 10 && cleanliness <= float64(threshold); attempt++ {
-		_, err = s.client.BathePet(ctx, selfID, petID, itemID, 1)
-		s.record(bindingID, "bathe", "", item, err == nil, resultMessage(err, fmt.Sprintf("清洁值 %.0f，已自动洗护", cleanliness)), "")
-		if err != nil { return true }
+		result, batheErr := s.client.BathePet(ctx, selfID, petID, itemID, 1)
+		s.record(bindingID, "bathe", "", item, batheErr == nil, resultMessage(batheErr, fmt.Sprintf("清洁值 %.0f，已自动洗护", cleanliness)), string(result))
+		if batheErr != nil { return true }
 		vitals, vitalsErr := s.client.GetPetVitals(ctx, selfID, petID)
 		if vitalsErr != nil { s.record(bindingID, "vitals", "", "", false, vitalsErr.Error(), ""); return true }
 		if updated, ok := findNumber(decodeObject(vitals), "cleanliness"); ok { cleanliness = updated } else { break }
@@ -1063,19 +1067,21 @@ func (s *Scheduler) batheIfNeeded(ctx context.Context, bindingID int64, qq, item
 	return true
 }
 
-func (s *Scheduler) petID(ctx context.Context, selfID int64) string {
+func (s *Scheduler) petID(ctx context.Context, selfID int64) (string, error) {
 	data, err := s.client.GetPetProfile(ctx, selfID)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	value := decodeObject(data)
 	for _, key := range []string{"pet_id", "id"} {
 		if text, ok := value[key].(string); ok && text != "" {
-			return text
+			return text, nil
 		}
 	}
-	return ""
+	return "", nil
 }
+
+func errorText(err error, fallback string) string { if err != nil { return err.Error() }; return fallback }
 
 func decodeObject(data []byte) map[string]any {
 	var value any
@@ -1546,9 +1552,6 @@ func validatePlanIDs(plan []PlanItem) error {
 func SaveConfig(ctx context.Context, db *sql.DB, bindingID int64, config Config) error {
 	if config.LearningTarget == "" {
 		config.LearningTarget = "力量"
-	}
-	if len(config.Plan) == 0 {
-		return errors.New("每日计划不能为空")
 	}
 	existing, err := LoadConfig(ctx, db, bindingID)
 	if err != nil {

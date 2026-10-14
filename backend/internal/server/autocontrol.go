@@ -147,7 +147,7 @@ func autoControlResetDailyPlanHandler(db *sql.DB) http.HandlerFunc {
 		bindingID, err := userBindingID(r, db, user.ID)
 		if err != nil { writeAutoControlBindingError(w, err); return }
 		if err := autocontrol.ResetDailyPlan(r.Context(), db, bindingID); err != nil { response.JSON(w, http.StatusInternalServerError, 9002, "每日计划重置失败", nil); return }
-		response.JSON(w, http.StatusOK, 0, "每日计划已重置", nil)
+		response.JSON(w, http.StatusOK, 0, "每日活动计划已清空，当日执行统计保留", nil)
 	}
 }
 
