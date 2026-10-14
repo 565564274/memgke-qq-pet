@@ -11,6 +11,7 @@ import ProfileView from '../views/user/ProfileView.vue'
 import QQAccountView from '../views/user/QQAccountView.vue'
 import PetView from '../views/user/pet/PetView.vue'
 import PetAutoControlView from '../views/user/pet/PetAutoControlView.vue'
+import PetPKView from '../views/user/pet/PetPKView.vue'
 import PetDailyStatsView from '../views/user/pet/PetDailyStatsView.vue'
 import PetFriendsView from '../views/user/pet/PetFriendsView.vue'
 import RankingView from '../views/user/RankingView.vue'
@@ -44,6 +45,7 @@ const userChildren = [
   { path: 'qq-account', component: QQAccountView, meta: { title: 'QQ 账号', requiresAuth: true } },
   { path: 'pet', component: PetView, meta: { title: 'QQ 宠物', requiresAuth: true } },
   { path: 'pet/auto-control', component: PetAutoControlView, meta: { title: '自动控制', requiresAuth: true } },
+  { path: 'pet/pk', component: PetPKView, meta: { title: '宠物 PK', requiresAuth: true } },
   { path: 'pet/daily-stats', component: PetDailyStatsView, meta: { title: '每日统计', requiresAuth: true } },
   { path: 'pet/friends', component: PetFriendsView, meta: { title: '好友管理', requiresAuth: true } },
   { path: 'ranking', component: RankingView, meta: { title: '战力排行榜', requiresAuth: true } },

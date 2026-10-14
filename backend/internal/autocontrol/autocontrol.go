@@ -77,6 +77,7 @@ type PlanItem struct {
 	WorkOption       string `json:"work_option,omitempty"`
 	WorkSubEventType *int64 `json:"work_sub_event_type,omitempty"`
 	StartTime        string `json:"start_time,omitempty"`
+	WorkFriendUin    string `json:"work_friend_uin,omitempty"`
 	WorkFriendQQ     string `json:"work_friend_qq,omitempty"`
 	WorkFriendPetID  string `json:"work_friend_pet_id,omitempty"`
 	ExecutedCount    int64  `json:"executed_count"`
@@ -117,6 +118,7 @@ type Config struct {
 	AutoBatheItem         string     `json:"auto_bathe_item"`
 	EncourageProbability  int64      `json:"encourage_probability"`
 	AutoPokeEnabled       bool       `json:"auto_poke_enabled"`
+	AutoPokeFriendQQs     []string   `json:"auto_poke_friend_qqs"`
 	AutoPokeStartTime     string     `json:"auto_poke_start_time"`
 	AutoPokeDailyLimit    int64      `json:"auto_poke_daily_limit"`
 	AutoPokeDailyCount    int64      `json:"auto_poke_daily_count"`
@@ -508,11 +510,12 @@ func (s *Scheduler) runBinding(parent context.Context, bindingID int64, qq strin
 		}
 	}
 	var result []byte
-	if activity == "work" && strings.TrimSpace(item.WorkFriendQQ) != "" && strings.TrimSpace(item.WorkFriendPetID) != "" {
-		if starter, ok := s.client.(interface { StartPetActivityForFriend(context.Context, int64, string, string, string, int64, string, string) (json.RawMessage, error) }); ok {
-			result, err = starter.StartPetActivityForFriend(ctx, selfID, petID, activity, option, subEventType, item.WorkFriendQQ, item.WorkFriendPetID)
-		} else {
-			err = errors.New("当前听雨客户端不支持好友宠物打工")
+	friendUin := effectiveFriendUin(item)
+	if activity == "work" && friendUin != "" && strings.TrimSpace(item.WorkFriendPetID) != "" {
+		result, err = s.client.StartPetActivityForFriend(ctx, selfID, petID, activity, option, subEventType, friendUin, item.WorkFriendPetID)
+		if err != nil {
+			s.record(bindingID, "start", activity, option, false, "雇佣好友打工失败，正在改为普通打工重试", err.Error())
+			result, err = s.client.StartPetActivity(ctx, selfID, petID, activity, option, subEventType)
 		}
 	} else {
 		result, err = s.client.StartPetActivity(ctx, selfID, petID, activity, option, subEventType)
@@ -578,6 +581,22 @@ func resetDailyConfig(ctx context.Context, db *sql.DB, bindingID int64, today st
 	return err
 }
 
+func ResetDailyPlan(ctx context.Context, db *sql.DB, bindingID int64) error {
+	config, err := LoadConfig(ctx, db, bindingID)
+	if err != nil { return err }
+	today := timeutil.Current().Format("2006-01-02")
+	for i := range config.Plan {
+		config.Plan[i].ExecutedCount = 0
+		config.Plan[i].ExecutedSeconds = 0
+		config.Plan[i].Completed = false
+		config.Plan[i].LastNotifiedDate = ""
+	}
+	if err := savePlanProgress(ctx, db, bindingID, config.Plan); err != nil { return err }
+	if err := resetDailyConfig(ctx, db, bindingID, today); err != nil { return err }
+	_, err = db.ExecContext(ctx, `INSERT INTO pet_auto_control_states (qq_binding_id, running, message, last_action, last_error, updated_at) VALUES (?,0,'已手动重置每日计划','reset','',?) ON CONFLICT(qq_binding_id) DO UPDATE SET running=0,message=excluded.message,last_action='reset',last_error='',updated_at=excluded.updated_at`, bindingID, timeutil.Now())
+	return err
+}
+
 func autoPokeStarted(startTime string) bool {
 	if startTime == "" {
 		startTime = "00:00"
@@ -621,15 +640,16 @@ func (s *Scheduler) runAutoPoke(ctx context.Context, bindingID int64, qq string,
 		}
 	}
 	var friendQQ string
+	selected := make(map[string]bool, len(config.AutoPokeFriendQQs))
+	for _, qq := range config.AutoPokeFriendQQs { if qq = strings.TrimSpace(qq); qq != "" { selected[qq] = true } }
 	today := timeutil.Current()
 	todayStart := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, timeutil.Beijing).Format(time.RFC3339)
-	err := s.db.QueryRowContext(ctx, `SELECT f.friend_qq FROM qq_friends f WHERE f.qq_binding_id = ? AND f.has_pet = 1 AND f.friend_qq != ? AND NOT EXISTS (SELECT 1 FROM pet_auto_control_logs l WHERE l.qq_binding_id = f.qq_binding_id AND l.action = 'poke' AND l.success = 1 AND l.option_name = f.friend_qq AND l.created_at >= ?) ORDER BY f.updated_at ASC LIMIT 1`, bindingID, qq, todayStart).Scan(&friendQQ)
-	if errors.Is(err, sql.ErrNoRows) {
+	rows, err := s.db.QueryContext(ctx, `SELECT f.friend_qq FROM qq_friends f WHERE f.qq_binding_id = ? AND f.has_pet = 1 AND f.friend_qq != ? AND NOT EXISTS (SELECT 1 FROM pet_auto_control_logs l WHERE l.qq_binding_id = f.qq_binding_id AND l.action = 'poke' AND l.success = 1 AND l.option_name = f.friend_qq AND l.created_at >= ?) ORDER BY f.updated_at ASC`, bindingID, qq, todayStart)
+	if err != nil { s.record(bindingID, "poke", "", "", false, "自动踩一踩候选好友读取失败", err.Error()); return true }
+	for rows.Next() { var candidate string; if rows.Scan(&candidate) == nil && (len(selected) == 0 || selected[candidate]) { friendQQ = candidate; break } }
+	rows.Close()
+	if friendQQ == "" {
 		return false
-	}
-	if err != nil {
-		s.record(bindingID, "poke", "", "", false, "自动踩一踩候选好友读取失败", err.Error())
-		return true
 	}
 	result, err := s.client.PokeFriendPet(ctx, mustInt64(qq), friendQQ)
 	if err != nil {
@@ -948,18 +968,21 @@ func (s *Scheduler) runPetCare(ctx context.Context, bindingID int64, qq string, 
 	vitals := decodeObject(vitalsData)
 	if config.AutoFeedEnabled {
 		if hunger, ok := findNumber(vitals, "hunger"); ok && hunger <= float64(config.AutoFeedThreshold) {
-			return s.feedIfNeeded(ctx, bindingID, qq, config.AutoFeedFood, hunger)
+			s.feedIfNeeded(ctx, bindingID, qq, config.AutoFeedFood, hunger, config.AutoFeedThreshold)
+			vitalsData, err = s.client.GetPetVitals(ctx, selfID, petID)
+			if err != nil { s.record(bindingID, "vitals", "", "", false, err.Error(), ""); return true }
+			vitals = decodeObject(vitalsData)
 		}
 	}
 	if config.AutoBatheEnabled {
 		if cleanliness, ok := findNumber(vitals, "cleanliness"); ok && cleanliness <= float64(config.AutoBatheThreshold) {
-			return s.batheIfNeeded(ctx, bindingID, qq, config.AutoBatheItem, cleanliness)
+			return s.batheIfNeeded(ctx, bindingID, qq, config.AutoBatheItem, cleanliness, config.AutoBatheThreshold)
 		}
 	}
 	return false
 }
 
-func (s *Scheduler) feedIfNeeded(ctx context.Context, bindingID int64, qq, food string, hunger float64) bool {
+func (s *Scheduler) feedIfNeeded(ctx context.Context, bindingID int64, qq, food string, hunger float64, threshold int64) bool {
 	selfID := mustInt64(qq)
 	petID := s.petID(ctx, selfID)
 	if petID == "" {
@@ -978,18 +1001,24 @@ func (s *Scheduler) feedIfNeeded(ctx context.Context, bindingID int64, qq, food 
 		return true
 	}
 	if stock < 5 {
-		if _, err = s.client.BuyPetFood(ctx, selfID, 10); err != nil {
+		if _, err = s.client.BuyPetFood(ctx, selfID, 20); err != nil {
 			s.record(bindingID, "buy_food", "", food, false, err.Error(), "")
 			return true
 		}
-		s.record(bindingID, "buy_food", "", food, true, "库存低于 5，已自动购买 10 个", "")
+		s.record(bindingID, "buy_food", "", food, true, "库存低于 5，已自动购买 20 个", "")
 	}
-	_, err = s.client.FeedPet(ctx, selfID, petID, foodID)
-	s.record(bindingID, "feed", "", food, err == nil, resultMessage(err, fmt.Sprintf("饥饿值 %.0f，已自动喂食", hunger)), "")
+	for attempt := 0; attempt < 10 && hunger <= float64(threshold); attempt++ {
+		_, err = s.client.FeedPet(ctx, selfID, petID, foodID)
+		s.record(bindingID, "feed", "", food, err == nil, resultMessage(err, fmt.Sprintf("饥饿值 %.0f，已自动喂食", hunger)), "")
+		if err != nil { return true }
+		vitals, vitalsErr := s.client.GetPetVitals(ctx, selfID, petID)
+		if vitalsErr != nil { s.record(bindingID, "vitals", "", "", false, vitalsErr.Error(), ""); return true }
+		if updated, ok := findNumber(decodeObject(vitals), "hunger"); ok { hunger = updated } else { break }
+	}
 	return true
 }
 
-func (s *Scheduler) batheIfNeeded(ctx context.Context, bindingID int64, qq, item string, cleanliness float64) bool {
+func (s *Scheduler) batheIfNeeded(ctx context.Context, bindingID int64, qq, item string, cleanliness float64, threshold int64) bool {
 	selfID := mustInt64(qq)
 	petID := s.petID(ctx, selfID)
 	if petID == "" {
@@ -1017,14 +1046,20 @@ func (s *Scheduler) batheIfNeeded(ctx context.Context, bindingID int64, qq, item
 		return true
 	}
 	if stock < 5 {
-		if _, err = s.client.BuyPetBathItem(ctx, selfID, petID, itemID, 10); err != nil {
+		if _, err = s.client.BuyPetBathItem(ctx, selfID, petID, itemID, 20); err != nil {
 			s.record(bindingID, "buy_bath", "", item, false, err.Error(), "")
 			return true
 		}
-		s.record(bindingID, "buy_bath", "", item, true, "库存低于 5，已自动购买 10 个", "")
+		s.record(bindingID, "buy_bath", "", item, true, "库存低于 5，已自动购买 20 个", "")
 	}
-	_, err = s.client.BathePet(ctx, selfID, petID, itemID, 1)
-	s.record(bindingID, "bathe", "", item, err == nil, resultMessage(err, fmt.Sprintf("清洁值 %.0f，已自动洗护", cleanliness)), "")
+	for attempt := 0; attempt < 10 && cleanliness <= float64(threshold); attempt++ {
+		_, err = s.client.BathePet(ctx, selfID, petID, itemID, 1)
+		s.record(bindingID, "bathe", "", item, err == nil, resultMessage(err, fmt.Sprintf("清洁值 %.0f，已自动洗护", cleanliness)), "")
+		if err != nil { return true }
+		vitals, vitalsErr := s.client.GetPetVitals(ctx, selfID, petID)
+		if vitalsErr != nil { s.record(bindingID, "vitals", "", "", false, vitalsErr.Error(), ""); return true }
+		if updated, ok := findNumber(decodeObject(vitals), "cleanliness"); ok { cleanliness = updated } else { break }
+	}
 	return true
 }
 
@@ -1416,7 +1451,8 @@ func LoadConfig(ctx context.Context, db *sql.DB, bindingID int64) (Config, error
 	var orderJSON string
 	var planJSON string
 	var autoPokeEnabled int
-	err := db.QueryRowContext(ctx, `SELECT enabled, learning_target, activity_order, plan_json, school_count, work_count, adventure_count, school_remaining, work_remaining, adventure_remaining, school_executed, work_executed, adventure_executed, school_control_mode, work_control_mode, adventure_control_mode, school_duration_seconds, work_duration_seconds, adventure_duration_seconds, school_duration_executed, work_duration_executed, adventure_duration_executed, work_option, auto_feed_enabled, auto_feed_threshold, auto_feed_food, auto_bathe_enabled, auto_bathe_threshold, auto_bathe_item, encourage_probability, auto_poke_enabled, auto_poke_start_time, auto_poke_daily_limit, auto_poke_daily_count, auto_poke_interval_seconds, COALESCE(auto_poke_last_run_at, ''), auto_poke_last_friend_qq, last_reset_date FROM pet_auto_control_configs WHERE qq_binding_id = ?`, bindingID).Scan(&enabled, &config.LearningTarget, &orderJSON, &planJSON, &config.SchoolCount, &config.WorkCount, &config.AdventureCount, &config.SchoolRemaining, &config.WorkRemaining, &config.AdventureRemain, &config.SchoolExecuted, &config.WorkExecuted, &config.AdventureExecuted, &config.SchoolControlMode, &config.WorkControlMode, &config.AdventureControlMode, &config.SchoolDuration, &config.WorkDuration, &config.AdventureDuration, &config.SchoolDurationUsed, &config.WorkDurationUsed, &config.AdventureDurationUsed, &config.WorkOption, &config.AutoFeedEnabled, &config.AutoFeedThreshold, &config.AutoFeedFood, &config.AutoBatheEnabled, &config.AutoBatheThreshold, &config.AutoBatheItem, &config.EncourageProbability, &autoPokeEnabled, &config.AutoPokeStartTime, &config.AutoPokeDailyLimit, &config.AutoPokeDailyCount, &config.AutoPokeInterval, &config.AutoPokeLastRunAt, &config.AutoPokeLastFriendQQ, &config.LastResetDate)
+	var autoPokeFriendsJSON string
+	err := db.QueryRowContext(ctx, `SELECT enabled, learning_target, activity_order, plan_json, school_count, work_count, adventure_count, school_remaining, work_remaining, adventure_remaining, school_executed, work_executed, adventure_executed, school_control_mode, work_control_mode, adventure_control_mode, school_duration_seconds, work_duration_seconds, adventure_duration_seconds, school_duration_executed, work_duration_executed, adventure_duration_executed, work_option, auto_feed_enabled, auto_feed_threshold, auto_feed_food, auto_bathe_enabled, auto_bathe_threshold, auto_bathe_item, encourage_probability, auto_poke_enabled, auto_poke_start_time, auto_poke_daily_limit, auto_poke_daily_count, auto_poke_interval_seconds, COALESCE(auto_poke_last_run_at, ''), auto_poke_last_friend_qq, COALESCE(auto_poke_friend_qqs_json,'[]'), last_reset_date FROM pet_auto_control_configs WHERE qq_binding_id = ?`, bindingID).Scan(&enabled, &config.LearningTarget, &orderJSON, &planJSON, &config.SchoolCount, &config.WorkCount, &config.AdventureCount, &config.SchoolRemaining, &config.WorkRemaining, &config.AdventureRemain, &config.SchoolExecuted, &config.WorkExecuted, &config.AdventureExecuted, &config.SchoolControlMode, &config.WorkControlMode, &config.AdventureControlMode, &config.SchoolDuration, &config.WorkDuration, &config.AdventureDuration, &config.SchoolDurationUsed, &config.WorkDurationUsed, &config.AdventureDurationUsed, &config.WorkOption, &config.AutoFeedEnabled, &config.AutoFeedThreshold, &config.AutoFeedFood, &config.AutoBatheEnabled, &config.AutoBatheThreshold, &config.AutoBatheItem, &config.EncourageProbability, &autoPokeEnabled, &config.AutoPokeStartTime, &config.AutoPokeDailyLimit, &config.AutoPokeDailyCount, &config.AutoPokeInterval, &config.AutoPokeLastRunAt, &config.AutoPokeLastFriendQQ, &autoPokeFriendsJSON, &config.LastResetDate)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Config{LearningTarget: "力量", ActivityOrder: []string{"school", "work", "adventure"}}, nil
 	}
@@ -1425,6 +1461,7 @@ func LoadConfig(ctx context.Context, db *sql.DB, bindingID int64) (Config, error
 	}
 	config.Enabled = enabled == 1
 	config.AutoPokeEnabled = autoPokeEnabled == 1
+	_ = json.Unmarshal([]byte(autoPokeFriendsJSON), &config.AutoPokeFriendQQs)
 	// 自动踩一踩统一在北京时间 00:00 开始，不使用历史配置中的自定义时间。
 	config.AutoPokeStartTime = "00:00"
 	if err := json.Unmarshal([]byte(orderJSON), &config.ActivityOrder); err != nil {
@@ -1432,6 +1469,10 @@ func LoadConfig(ctx context.Context, db *sql.DB, bindingID int64) (Config, error
 	}
 	if strings.TrimSpace(planJSON) != "" && json.Unmarshal([]byte(planJSON), &config.Plan) != nil {
 		return Config{}, errors.New("每日计划格式无效")
+	}
+	for index := range config.Plan {
+		config.Plan[index].WorkFriendUin = effectiveFriendUin(config.Plan[index])
+		config.Plan[index].WorkFriendQQ = ""
 	}
 	if len(config.Plan) == 0 {
 		config.Plan = legacyPlan(config)
@@ -1476,7 +1517,12 @@ func planItemDefinitionEqual(left, right PlanItem) bool {
 		int64PointersEqual(left.WorkCareerType, right.WorkCareerType) &&
 		left.WorkOption == right.WorkOption &&
 		int64PointersEqual(left.WorkSubEventType, right.WorkSubEventType) &&
-		left.StartTime == right.StartTime && left.WorkFriendQQ == right.WorkFriendQQ && left.WorkFriendPetID == right.WorkFriendPetID
+		left.StartTime == right.StartTime && effectiveFriendUin(left) == effectiveFriendUin(right) && left.WorkFriendPetID == right.WorkFriendPetID
+}
+
+func effectiveFriendUin(item PlanItem) string {
+	if value := strings.TrimSpace(item.WorkFriendUin); value != "" { return value }
+	return strings.TrimSpace(item.WorkFriendQQ)
 }
 
 func int64PointersEqual(left, right *int64) bool {
@@ -1555,16 +1601,17 @@ func SaveConfig(ctx context.Context, db *sql.DB, bindingID int64, config Config)
 			if item.WorkSubEventType == nil {
 				return errors.New("打工项目缺少子事件类型")
 			}
-			item.WorkFriendQQ = strings.TrimSpace(item.WorkFriendQQ)
+			item.WorkFriendUin = effectiveFriendUin(*item)
 			item.WorkFriendPetID = strings.TrimSpace(item.WorkFriendPetID)
-			if (item.WorkFriendQQ == "") != (item.WorkFriendPetID == "") {
+			if (item.WorkFriendUin == "") != (item.WorkFriendPetID == "") {
 				return errors.New("好友 QQ 和好友宠物 ID 必须同时填写")
 			}
+			item.WorkFriendQQ = ""
 		} else {
 			item.WorkCareerType = nil
 			item.WorkOption = ""
 			item.WorkSubEventType = nil
-			item.WorkFriendQQ, item.WorkFriendPetID = "", ""
+			item.WorkFriendUin, item.WorkFriendQQ, item.WorkFriendPetID = "", "", ""
 		}
 		if item.StartTime != "" {
 			if _, err := time.Parse("15:04", item.StartTime); err != nil { return errors.New("计划开始时间格式须为 HH:mm") }
@@ -1614,8 +1661,18 @@ func SaveConfig(ctx context.Context, db *sql.DB, bindingID int64, config Config)
 	if config.AutoPokeInterval < 1 {
 		return errors.New("自动踩一踩间隔须大于 0 秒")
 	}
+	friendRows, err := db.QueryContext(ctx, "SELECT friend_qq FROM qq_friends WHERE qq_binding_id=? AND has_pet=1", bindingID)
+	if err != nil { return err }
+	validFriends := map[string]bool{}
+	for friendRows.Next() { var friend string; if err := friendRows.Scan(&friend); err != nil { friendRows.Close(); return err }; validFriends[friend] = true }
+	if err := friendRows.Err(); err != nil { friendRows.Close(); return err }; friendRows.Close()
+	seenPokeFriends := map[string]bool{}
+	for _, friend := range config.AutoPokeFriendQQs { friend = strings.TrimSpace(friend); if friend == "" || !validFriends[friend] { return errors.New("踩一踩好友必须来自当前好友列表且拥有宠物") }; if !seenPokeFriends[friend] { seenPokeFriends[friend] = true } }
+	config.AutoPokeFriendQQs = config.AutoPokeFriendQQs[:0]
+	for friend := range seenPokeFriends { config.AutoPokeFriendQQs = append(config.AutoPokeFriendQQs, friend) }
 	order, _ := json.Marshal(config.ActivityOrder)
 	plan, _ := json.Marshal(config.Plan)
+	pokeFriends, _ := json.Marshal(config.AutoPokeFriendQQs)
 	if config.LastResetDate == "" {
 		config.LastResetDate = timeutil.Current().Format("2006-01-02")
 	}
@@ -1631,9 +1688,9 @@ func SaveConfig(ctx context.Context, db *sql.DB, bindingID int64, config Config)
 		auto_bathe_enabled, auto_bathe_threshold, auto_bathe_item,
 		encourage_probability, auto_poke_enabled, auto_poke_start_time, auto_poke_daily_limit,
 		auto_poke_daily_count, auto_poke_interval_seconds, auto_poke_last_run_at,
-		auto_poke_last_friend_qq, last_reset_date, created_at, updated_at
+		 auto_poke_last_friend_qq, auto_poke_friend_qqs_json, last_reset_date, created_at, updated_at
 	) VALUES (
-		?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+		?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 		?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 		?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 		?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -1662,6 +1719,7 @@ func SaveConfig(ctx context.Context, db *sql.DB, bindingID int64, config Config)
 		auto_poke_start_time=excluded.auto_poke_start_time,
 		auto_poke_daily_limit=excluded.auto_poke_daily_limit,
 		auto_poke_interval_seconds=excluded.auto_poke_interval_seconds,
+		auto_poke_friend_qqs_json=excluded.auto_poke_friend_qqs_json,
 		last_reset_date=excluded.last_reset_date, updated_at=excluded.updated_at`,
 		bindingID, boolInt(config.Enabled), config.LearningTarget, string(order), string(plan),
 		config.SchoolCount, config.WorkCount, config.AdventureCount,
@@ -1674,7 +1732,7 @@ func SaveConfig(ctx context.Context, db *sql.DB, bindingID int64, config Config)
 		config.AutoFeedFood, boolInt(config.AutoBatheEnabled), config.AutoBatheThreshold,
 		config.AutoBatheItem, config.EncourageProbability, boolInt(config.AutoPokeEnabled), config.AutoPokeStartTime,
 		config.AutoPokeDailyLimit, existing.AutoPokeDailyCount, config.AutoPokeInterval,
-		existing.AutoPokeLastRunAt, existing.AutoPokeLastFriendQQ, config.LastResetDate, now, now)
+		existing.AutoPokeLastRunAt, existing.AutoPokeLastFriendQQ, string(pokeFriends), config.LastResetDate, now, now)
 	if err == nil {
 		_, _ = db.ExecContext(ctx, "INSERT INTO pet_auto_control_states (qq_binding_id, message, updated_at) VALUES (?, ?, ?) ON CONFLICT(qq_binding_id) DO UPDATE SET message = excluded.message, updated_at = excluded.updated_at", bindingID, map[bool]string{true: "自动控制已开启", false: "自动控制已关闭"}[config.Enabled], now)
 	}
@@ -1693,7 +1751,16 @@ func LoadState(ctx context.Context, db *sql.DB, bindingID int64) (State, error) 
 }
 
 func LoadLogs(ctx context.Context, db *sql.DB, bindingID int64, limit int) ([]Log, error) {
-	rows, err := db.QueryContext(ctx, "SELECT id, action, activity, option_name, success, message, details, created_at FROM pet_auto_control_logs WHERE qq_binding_id = ? ORDER BY id DESC LIMIT ?", bindingID, limit)
+	return LoadLogsByDate(ctx, db, bindingID, limit, "")
+}
+
+func LoadLogsByDate(ctx context.Context, db *sql.DB, bindingID int64, limit int, date string) ([]Log, error) {
+	query := "SELECT id, action, activity, option_name, success, message, details, created_at FROM pet_auto_control_logs WHERE qq_binding_id = ?"
+	args := []any{bindingID}
+	if date != "" { query += " AND substr(created_at,1,10)=?"; args = append(args, date) }
+	query += " ORDER BY id DESC LIMIT ?"
+	args = append(args, limit)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

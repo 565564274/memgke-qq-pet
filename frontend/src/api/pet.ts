@@ -155,6 +155,8 @@ export interface AutoPKLog {
   created_at: string
 }
 
+export interface ManualPKState { enabled: boolean; target_starts: number; today_starts: number; total_starts: number; today_date: string; rounds: number; message: string; updated_at: string; logs: { message: string; created_at: string }[] }
+
 export interface PetPKStranger {
   pet_id: string
   pet_name: string
@@ -262,6 +264,7 @@ export interface PetAutoControlPlanItem {
   work_option?: string
   work_sub_event_type?: number
   start_time?: string
+  work_friend_uin?: string
   work_friend_qq?: string
   work_friend_pet_id?: string
   executed_count: number
@@ -301,6 +304,7 @@ export interface PetAutoControlConfig {
   auto_bathe_item: string
   encourage_probability: number
   auto_poke_enabled: boolean
+  auto_poke_friend_qqs: string[]
   auto_poke_start_time: string
   auto_poke_daily_count: number
   auto_poke_interval_seconds: number
@@ -393,7 +397,10 @@ export const updateAutoPKConfig = (qq: string, targetStarts: number, startTime =
 export const startAutoPK = (qq: string) => post<AutoPKState>(`/api/pets/${encodeURIComponent(qq)}/auto-pk/start`)
 export const stopAutoPK = (qq: string) => post<AutoPKState>(`/api/pets/${encodeURIComponent(qq)}/auto-pk/stop`)
 export const getAutoPKState = (qq: string) => get<AutoPKState>(`/api/pets/${encodeURIComponent(qq)}/auto-pk/state`)
-export const getAutoPKLogs = (qq: string, limit = 20) => get<AutoPKLog[]>(`/api/pets/${encodeURIComponent(qq)}/auto-pk/logs?limit=${limit}`)
+export const getAutoPKLogs = (qq: string, limit = 20, date?: string) => get<AutoPKLog[]>(`/api/pets/${encodeURIComponent(qq)}/auto-pk/logs?limit=${limit}${date ? `&date=${encodeURIComponent(date)}` : ''}`)
+export const getManualPKState = (qq: string) => get<ManualPKState>(`/api/pets/${encodeURIComponent(qq)}/manual-pk/state`)
+export const startManualPK = (qq: string, target_starts: number) => post<ManualPKState>(`/api/pets/${encodeURIComponent(qq)}/manual-pk/start`, { target_starts })
+export const stopManualPK = (qq: string) => post<ManualPKState>(`/api/pets/${encodeURIComponent(qq)}/manual-pk/stop`)
 export const getPetMedalGallery = (qq: string) => get<PetMedalGallery>(`/api/pets/${encodeURIComponent(qq)}/medals`)
 export const getPetInteractionMessages = (qq: string) => get<PetInteractionMessages>(`/api/pets/${encodeURIComponent(qq)}/interaction-messages`)
 export const getPetDailyStats = (qq: string, range: '7d' | '30d' = '7d') => get<PetDailyStat[]>(`/api/pets/${encodeURIComponent(qq)}/daily-stats?range=${range}`)
@@ -409,6 +416,7 @@ export const getPetAutoControlInventory = (qq: string) => get<PetAutoControlInve
 export const getPetAutoControlConfig = (qq: string) => get<PetAutoControlConfig>(`/api/pets/${encodeURIComponent(qq)}/auto-control/config`)
 export const savePetAutoControlConfig = (qq: string, config: PetAutoControlConfig) => put<PetAutoControlConfig>(`/api/pets/${encodeURIComponent(qq)}/auto-control/config`, config)
 export const getPetAutoControlState = (qq: string) => get<PetAutoControlState>(`/api/pets/${encodeURIComponent(qq)}/auto-control/state`)
-export const getPetAutoControlLogs = (qq: string, limit = 20) => get<PetAutoControlLog[]>(`/api/pets/${encodeURIComponent(qq)}/auto-control/logs?limit=${limit}`)
+export const getPetAutoControlLogs = (qq: string, limit = 20, date?: string) => get<PetAutoControlLog[]>(`/api/pets/${encodeURIComponent(qq)}/auto-control/logs?limit=${limit}${date ? `&date=${encodeURIComponent(date)}` : ''}`)
+export const resetPetAutoControlDailyPlan = (qq: string) => post<null>(`/api/pets/${encodeURIComponent(qq)}/auto-control/reset-daily-plan`)
 export const bathePet = (qq: string) => post<unknown>(`/api/pets/${encodeURIComponent(qq)}/bathe?item_name=${encodeURIComponent('香皂片')}`)
 export const buyPetBathItem = (qq: string, itemName: string) => post<unknown>(`/api/pets/${encodeURIComponent(qq)}/bath-purchase?item_name=${encodeURIComponent(itemName)}`)

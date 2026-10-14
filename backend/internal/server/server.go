@@ -29,6 +29,7 @@ import (
 	"qq-pet/backend/internal/autopk"
 	"qq-pet/backend/internal/config"
 	"qq-pet/backend/internal/logstream"
+	"qq-pet/backend/internal/manualpk"
 	"qq-pet/backend/internal/mokant"
 	"qq-pet/backend/internal/officialbot"
 	"qq-pet/backend/internal/response"
@@ -48,6 +49,7 @@ func NewRouter(db *sql.DB, cfg config.Config, logger *slog.Logger, clients ...an
 	var mokantManager *mokant.Manager
 	var autoControlScheduler *autocontrol.Scheduler
 	var autoPKScheduler *autopk.Scheduler
+	var manualPKScheduler *manualpk.Scheduler
 	var botNotifier *officialbot.Notifier
 	var logHub *logstream.Hub
 	for _, item := range clients {
@@ -60,6 +62,8 @@ func NewRouter(db *sql.DB, cfg config.Config, logger *slog.Logger, clients ...an
 			autoControlScheduler = value
 		case *autopk.Scheduler:
 			autoPKScheduler = value
+		case *manualpk.Scheduler:
+			manualPKScheduler = value
 		case *officialbot.Notifier:
 			botNotifier = value
 		case *logstream.Hub:
@@ -150,12 +154,16 @@ func NewRouter(db *sql.DB, cfg config.Config, logger *slog.Logger, clients ...an
 	router.With(authService.RequireUser).Put("/api/pets/{qq}/auto-control/config", autoControlConfigHandler(db, true, autoControlScheduler))
 	router.With(authService.RequireUser).Get("/api/pets/{qq}/auto-control/state", autoControlStateHandler(db))
 	router.With(authService.RequireUser).Get("/api/pets/{qq}/auto-control/logs", autoControlLogsHandler(db))
+	router.With(authService.RequireUser).Post("/api/pets/{qq}/auto-control/reset-daily-plan", autoControlResetDailyPlanHandler(db))
 	router.With(authService.RequireUser).Get("/api/pets/{qq}/auto-pk/config", autoPKConfigHandler(db, false))
 	router.With(authService.RequireUser).Put("/api/pets/{qq}/auto-pk/config", autoPKConfigHandler(db, true))
 	router.With(authService.RequireUser).Post("/api/pets/{qq}/auto-pk/start", autoPKStartHandler(db, autoPKScheduler))
 	router.With(authService.RequireUser).Post("/api/pets/{qq}/auto-pk/stop", autoPKStopHandler(db, autoPKScheduler))
 	router.With(authService.RequireUser).Get("/api/pets/{qq}/auto-pk/state", autoPKStateHandler(db))
 	router.With(authService.RequireUser).Get("/api/pets/{qq}/auto-pk/logs", autoPKLogsHandler(db))
+	router.With(authService.RequireUser).Post("/api/pets/{qq}/manual-pk/start", manualPKHandler(db, manualPKScheduler, "start"))
+	router.With(authService.RequireUser).Post("/api/pets/{qq}/manual-pk/stop", manualPKHandler(db, manualPKScheduler, "stop"))
+	router.With(authService.RequireUser).Get("/api/pets/{qq}/manual-pk/state", manualPKHandler(db, manualPKScheduler, "state"))
 	router.With(authService.RequireUser).Get("/api/qq/account/nodes", qqAccountNodesHandler(mokantClient))
 	router.With(authService.RequireUser).Get("/api/qq/account/options", qqAccountOptionsHandler(mokantClient, mokantManager))
 	router.With(authService.RequireUser).Get("/api/qq/account/price", qqAccountPriceHandler(db))

@@ -21,6 +21,7 @@ import (
 	"qq-pet/backend/internal/config"
 	"qq-pet/backend/internal/database"
 	"qq-pet/backend/internal/logstream"
+	"qq-pet/backend/internal/manualpk"
 	"qq-pet/backend/internal/mokant"
 	"qq-pet/backend/internal/officialbot"
 	"qq-pet/backend/internal/server"
@@ -64,9 +65,11 @@ func main() {
 	autoControlScheduler.Start(context.Background())
 	autoPKScheduler := autopk.NewScheduler(db, mokantClient, logger)
 	autoPKScheduler.Start(context.Background())
+	manualPKScheduler := manualpk.NewScheduler(db, mokantClient)
+	manualPKScheduler.Start(context.Background())
 	httpServer := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           server.NewRouter(db, cfg, logger, mokantManager, autoControlScheduler, autoPKScheduler, botNotifier, logHub),
+		Handler:           server.NewRouter(db, cfg, logger, mokantManager, autoControlScheduler, autoPKScheduler, manualPKScheduler, botNotifier, logHub),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -88,6 +91,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	autoPKScheduler.Stop()
+	manualPKScheduler.Stop()
 	autoControlScheduler.Stop()
 	mokantManager.Stop()
 	if err := httpServer.Shutdown(ctx); err != nil {

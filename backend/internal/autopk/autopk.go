@@ -471,7 +471,7 @@ func (s *Scheduler) runBindingWorker(ctx context.Context, bindingID int64, qq st
 		if more { return true }
 	}
 	item.rounds++
-	if item.rounds < 3 {
+	if item.rounds < 5 {
 		return true
 	}
 	s.finishDaily(bindingID, "库内陌生人PK完成", "exhausted")
@@ -926,7 +926,7 @@ func LoadConfig(ctx context.Context, db *sql.DB, bindingID int64) (Config, error
 	var preferredJSON string
 	err := db.QueryRowContext(ctx, "SELECT enabled, target_starts, COALESCE(start_time, '00:00'), COALESCE(preferred_friends_json, '[]') FROM pet_auto_pk_configs WHERE qq_binding_id = ?", bindingID).Scan(&enabled, &config.TargetStarts, &config.StartTime, &preferredJSON)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Config{TargetStarts: 10, StartTime: "01:00", PreferredFriends: []PreferredFriend{}}, nil
+		return Config{TargetStarts: 10, StartTime: "00:00", PreferredFriends: []PreferredFriend{}}, nil
 	}
 	if config.StartTime == "" {
 		config.StartTime = "00:00"
@@ -959,10 +959,19 @@ func LoadState(ctx context.Context, db *sql.DB, bindingID int64) (State, error) 
 }
 
 func LoadLogs(ctx context.Context, db *sql.DB, bindingID int64, limit int) ([]Log, error) {
-	if limit < 1 || limit > 100 {
+	return LoadLogsByDate(ctx, db, bindingID, limit, "")
+}
+
+func LoadLogsByDate(ctx context.Context, db *sql.DB, bindingID int64, limit int, date string) ([]Log, error) {
+	if limit < 1 || limit > 500 {
 		limit = 20
 	}
-	rows, err := db.QueryContext(ctx, "SELECT id, action, opponent_user_id, opponent_pet_id, opponent_power, success, message, details, created_at FROM pet_auto_pk_logs WHERE qq_binding_id = ? AND action = 'start' AND success = 1 ORDER BY id DESC LIMIT ?", bindingID, limit)
+	query := "SELECT id, action, opponent_user_id, opponent_pet_id, opponent_power, success, message, details, created_at FROM pet_auto_pk_logs WHERE qq_binding_id = ? AND action = 'start' AND success = 1"
+	args := []any{bindingID}
+	if date != "" { query += " AND substr(created_at,1,10)=?"; args = append(args, date) }
+	query += " ORDER BY id DESC LIMIT ?"
+	args = append(args, limit)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

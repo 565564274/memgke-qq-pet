@@ -37,6 +37,7 @@ const links = computed(() => props.admin ? [
   { to: '/profile', label: '个人信息', icon: User },
   { to: '/pet', label: 'QQ 宠物', icon: Monitor },
   { to: '/pet/auto-control', label: '自动控制', icon: Setting },
+  { to: '/pet/pk', label: '宠物 PK', icon: List },
   { to: '/pet/friends', label: '好友管理', icon: UserFilled },
   { to: '/ranking', label: '战力排行', icon: List },
 ])

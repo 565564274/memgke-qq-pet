@@ -235,7 +235,7 @@ CREATE TABLE IF NOT EXISTS pet_auto_pk_configs (
     qq_binding_id INTEGER PRIMARY KEY,
     enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
     target_starts INTEGER NOT NULL DEFAULT 10 CHECK (target_starts >= 0),
-    start_time TEXT NOT NULL DEFAULT '01:00',
+    start_time TEXT NOT NULL DEFAULT '00:00',
     preferred_friends_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -289,6 +289,41 @@ CREATE TABLE IF NOT EXISTS pet_auto_pk_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_pet_auto_pk_logs_binding_created ON pet_auto_pk_logs(qq_binding_id, id DESC);
 
+CREATE TABLE IF NOT EXISTS pet_manual_pk_states (
+    qq_binding_id INTEGER PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0,1)),
+    target_starts INTEGER NOT NULL DEFAULT 10,
+    today_starts INTEGER NOT NULL DEFAULT 0,
+    total_starts INTEGER NOT NULL DEFAULT 0,
+    today_date TEXT NOT NULL DEFAULT '',
+    rounds INTEGER NOT NULL DEFAULT 0,
+    cursor TEXT NOT NULL DEFAULT '',
+    story_id TEXT NOT NULL DEFAULT '',
+    current_user_id TEXT NOT NULL DEFAULT '',
+    current_pet_id TEXT NOT NULL DEFAULT '',
+    current_attempt INTEGER NOT NULL DEFAULT 0,
+    message TEXT NOT NULL DEFAULT '手动 PK 未启动',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (qq_binding_id) REFERENCES qq_bindings(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS pet_manual_pk_daily_opponents (
+    qq_binding_id INTEGER NOT NULL,
+    opponent_user_id TEXT NOT NULL,
+    run_date TEXT NOT NULL,
+    start_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (qq_binding_id, opponent_user_id, run_date),
+    FOREIGN KEY (qq_binding_id) REFERENCES qq_bindings(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS pet_manual_pk_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    qq_binding_id INTEGER NOT NULL,
+    message TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (qq_binding_id) REFERENCES qq_bindings(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_pet_manual_pk_logs_binding ON pet_manual_pk_logs(qq_binding_id,id DESC);
+
 CREATE TABLE IF NOT EXISTS pet_auto_control_configs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     qq_binding_id INTEGER NOT NULL UNIQUE,
@@ -328,6 +363,7 @@ CREATE TABLE IF NOT EXISTS pet_auto_control_configs (
     auto_poke_interval_seconds INTEGER NOT NULL DEFAULT 1 CHECK (auto_poke_interval_seconds >= 1),
     auto_poke_last_run_at TEXT,
     auto_poke_last_friend_qq TEXT NOT NULL DEFAULT '',
+    auto_poke_friend_qqs_json TEXT NOT NULL DEFAULT '[]',
     last_reset_date TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -444,7 +480,12 @@ func Migrate(db *sql.DB) error {
 		"ALTER TABLE pet_auto_pk_logs ADD COLUMN opponent_power INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE pet_auto_pk_configs ADD COLUMN start_time TEXT NOT NULL DEFAULT '00:00'",
 		"ALTER TABLE pet_auto_pk_configs ADD COLUMN preferred_friends_json TEXT NOT NULL DEFAULT '[]'",
-		"UPDATE pet_auto_pk_configs SET target_starts = 10, start_time = '01:00', updated_at = CURRENT_TIMESTAMP",
+		"ALTER TABLE pet_manual_pk_states ADD COLUMN cursor TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE pet_manual_pk_states ADD COLUMN story_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE pet_manual_pk_states ADD COLUMN current_user_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE pet_manual_pk_states ADD COLUMN current_pet_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE pet_manual_pk_states ADD COLUMN current_attempt INTEGER NOT NULL DEFAULT 0",
+		"UPDATE pet_auto_pk_configs SET target_starts = 10, start_time = '00:00', updated_at = CURRENT_TIMESTAMP",
 		"ALTER TABLE redeem_codes ADD COLUMN code_ciphertext TEXT",
 		"ALTER TABLE pet_auto_control_configs ADD COLUMN auto_feed_enabled INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE pet_auto_control_configs ADD COLUMN auto_feed_threshold INTEGER NOT NULL DEFAULT 30",
@@ -461,6 +502,7 @@ func Migrate(db *sql.DB) error {
 		"ALTER TABLE pet_auto_control_configs ADD COLUMN auto_poke_interval_seconds INTEGER NOT NULL DEFAULT 1",
 		"ALTER TABLE pet_auto_control_configs ADD COLUMN auto_poke_last_run_at TEXT",
 		"ALTER TABLE pet_auto_control_configs ADD COLUMN auto_poke_last_friend_qq TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE pet_auto_control_configs ADD COLUMN auto_poke_friend_qqs_json TEXT NOT NULL DEFAULT '[]'",
 		"ALTER TABLE pet_auto_control_configs ADD COLUMN last_reset_date TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE pet_auto_control_configs ADD COLUMN school_executed INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE pet_auto_control_configs ADD COLUMN work_executed INTEGER NOT NULL DEFAULT 0",

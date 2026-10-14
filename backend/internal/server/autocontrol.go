@@ -126,15 +126,28 @@ func autoControlLogsHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		if limit < 1 || limit > 100 {
+		if limit < 1 || limit > 500 {
 			limit = 20
 		}
-		logs, err := autocontrol.LoadLogs(r.Context(), db, bindingID, limit)
+		date := strings.TrimSpace(r.URL.Query().Get("date"))
+		if date != "" && (len(date) != 10 || date[4] != '-' || date[7] != '-') { response.JSON(w, http.StatusBadRequest, 4003, "日期格式须为 YYYY-MM-DD", nil); return }
+		logs, err := autocontrol.LoadLogsByDate(r.Context(), db, bindingID, limit, date)
 		if err != nil {
 			response.JSON(w, http.StatusInternalServerError, 9002, "自动控制日志读取失败", nil)
 			return
 		}
 		response.JSON(w, http.StatusOK, 0, "ok", logs)
+	}
+}
+
+func autoControlResetDailyPlanHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user, ok := auth.UserFromContext(r.Context())
+		if !ok { response.JSON(w, http.StatusUnauthorized, 1001, "请先登录", nil); return }
+		bindingID, err := userBindingID(r, db, user.ID)
+		if err != nil { writeAutoControlBindingError(w, err); return }
+		if err := autocontrol.ResetDailyPlan(r.Context(), db, bindingID); err != nil { response.JSON(w, http.StatusInternalServerError, 9002, "每日计划重置失败", nil); return }
+		response.JSON(w, http.StatusOK, 0, "每日计划已重置", nil)
 	}
 }
 

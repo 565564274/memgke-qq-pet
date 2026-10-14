@@ -32,7 +32,7 @@ func autoPKConfigHandler(db *sql.DB, update bool) http.HandlerFunc {
 				return
 			}
 			config.TargetStarts = 10
-			config.StartTime = "01:00"
+			config.StartTime = "00:00"
 			response.JSON(w, http.StatusOK, 0, "ok", config)
 			return
 		}
@@ -60,7 +60,7 @@ func autoPKConfigHandler(db *sql.DB, update bool) http.HandlerFunc {
 		}
 		// 自动 PK 的次数和开始时间由系统固定，客户端只负责保存兼容请求。
 		config.TargetStarts = 10
-		config.StartTime = "01:00"
+		config.StartTime = "00:00"
 		config.PreferredFriends = input.PreferredFriends
 		if err := autopk.SaveConfig(r.Context(), db, bindingID, config); err != nil {
 			response.JSON(w, http.StatusBadRequest, 4003, err.Error(), nil)
@@ -90,7 +90,7 @@ func autoPKStartHandler(db *sql.DB, scheduler *autopk.Scheduler) http.HandlerFun
 		// 自动 PK 的执行策略由系统统一固定，用户端只控制启停。
 		config, loadErr := autopk.LoadConfig(r.Context(), db, bindingID)
 		if loadErr != nil { response.JSON(w, http.StatusInternalServerError, 9002, "自动 PK 配置读取失败", nil); return }
-		config.Enabled, config.TargetStarts, config.StartTime = true, 10, "01:00"
+		config.Enabled, config.TargetStarts, config.StartTime = true, 10, "00:00"
 		if err := autopk.SaveConfig(r.Context(), db, bindingID, config); err != nil {
 			response.JSON(w, http.StatusInternalServerError, 9002, "自动 PK 配置保存失败", nil)
 			return
@@ -163,7 +163,9 @@ func autoPKLogsHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		logs, err := autopk.LoadLogs(r.Context(), db, bindingID, limit)
+		date := strings.TrimSpace(r.URL.Query().Get("date"))
+		if date != "" && (len(date) != 10 || date[4] != '-' || date[7] != '-') { response.JSON(w, http.StatusBadRequest, 4003, "日期格式须为 YYYY-MM-DD", nil); return }
+		logs, err := autopk.LoadLogsByDate(r.Context(), db, bindingID, limit, date)
 		if err != nil {
 			response.JSON(w, http.StatusInternalServerError, 9002, "自动 PK 日志读取失败", nil)
 			return

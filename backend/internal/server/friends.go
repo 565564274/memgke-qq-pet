@@ -372,29 +372,40 @@ func filterPetFriendsHandler(db *sql.DB, client mokant.API) http.HandlerFunc {
 }
 
 func filterPetFriends(ctx context.Context, db *sql.DB, client mokant.API, bindingID, selfID int64) {
-	rows, err := db.QueryContext(ctx, `SELECT friend_qq FROM qq_friends WHERE qq_binding_id=? AND has_pet=1 AND pet_id='' AND friend_qq NOT LIKE '2854%'`, bindingID)
+	rows, err := db.QueryContext(ctx, `SELECT id, friend_qq FROM qq_friends WHERE qq_binding_id=? AND has_pet=1 AND pet_id='' AND friend_qq NOT LIKE '2854%'`, bindingID)
 	if err != nil {
 		finishFriendRefresh(db, bindingID, "failed", "待过滤好友读取失败", err.Error())
 		return
 	}
 	defer rows.Close()
-	friends := make([]string, 0)
+	type pendingFriend struct { id int64; qq string }
+	friends := make([]pendingFriend, 0)
 	for rows.Next() {
+		var friendID int64
 		var friendQQ string
-		if rows.Scan(&friendQQ) == nil {
-			friends = append(friends, friendQQ)
+		if rows.Scan(&friendID, &friendQQ) == nil {
+			friends = append(friends, pendingFriend{id: friendID, qq: friendQQ})
 		}
 	}
 	checked, removed := 0, 0
-	for _, friendQQ := range friends {
-		petData, petErr := client.GetFriendPetProfile(ctx, selfID, friendQQ, "")
+	for _, friend := range friends {
+		petData, petErr := client.GetFriendPetProfile(ctx, selfID, friend.qq, "")
 		if petErr == nil {
 			hasPet, recognized := friendProfileHasPet(petData)
 			if recognized {
+			var autoPetID string
+			if hasPet {
+				var value any
+				if json.Unmarshal(petData, &value) == nil {
+					if profile, ok, _ := friendPetProfileValue(value); ok && profile != nil {
+						autoPetID = strings.TrimSpace(fmt.Sprint(profile["pet_id"]))
+					}
+				}
+			}
 				if hasPet {
-					_, _ = db.ExecContext(ctx, `UPDATE qq_friends SET pet_data=?,updated_at=? WHERE qq_binding_id=? AND friend_qq=? AND pet_id=''`, string(petData), timeutil.Now(), bindingID, friendQQ)
+					_, _ = db.ExecContext(ctx, `UPDATE qq_friends SET pet_id=?,pet_data=?,updated_at=? WHERE qq_binding_id=? AND friend_qq=? AND pet_id=''`, autoPetID, string(petData), timeutil.Now(), bindingID, friend.qq)
 				} else {
-					_, _ = db.ExecContext(ctx, `UPDATE qq_friends SET has_pet=0,pet_data=NULL,updated_at=? WHERE qq_binding_id=? AND friend_qq=? AND pet_id=''`, timeutil.Now(), bindingID, friendQQ)
+					_, _ = db.ExecContext(ctx, `UPDATE qq_friends SET has_pet=0,pet_data=NULL,updated_at=? WHERE qq_binding_id=? AND friend_qq=? AND pet_id=''`, timeutil.Now(), bindingID, friend.qq)
 					removed++
 				}
 			}
@@ -439,10 +450,6 @@ func friendRefreshStateHandler(db *sql.DB) http.HandlerFunc {
 }
 
 func refreshFriends(ctx context.Context, db *sql.DB, client mokant.API, bindingID, selfID int64) {
-	if directory, ok := client.(interface { GetPetPKFriends(context.Context, int64, string) (json.RawMessage, error) }); ok {
-		refreshPetPKFriends(ctx, db, directory, bindingID, selfID)
-		return
-	}
 	data, err := client.GetFriendList(ctx, selfID)
 	if err != nil {
 		finishFriendRefresh(db, bindingID, "failed", "好友列表获取失败", err.Error())
@@ -495,44 +502,19 @@ func refreshFriends(ctx context.Context, db *sql.DB, client mokant.API, bindingI
 			continue
 		}
 		var encodedPet any
+		autoPetID := ""
 		if hasPet {
 			encodedPet = string(petData)
+			var value any
+			if json.Unmarshal(petData, &value) == nil {
+				if profile, ok, _ := friendPetProfileValue(value); ok && profile != nil {
+					autoPetID = strings.TrimSpace(fmt.Sprint(profile["pet_id"]))
+				}
+			}
 		}
-		_, _ = db.ExecContext(ctx, `UPDATE qq_friends SET has_pet=?,pet_data=?,updated_at=? WHERE qq_binding_id=? AND friend_qq=? AND pet_id=''`, hasPet, encodedPet, timeutil.Now(), bindingID, friend.qq)
+		_, _ = db.ExecContext(ctx, `UPDATE qq_friends SET has_pet=?,pet_id=?,pet_data=?,updated_at=? WHERE qq_binding_id=? AND friend_qq=? AND pet_id=''`, hasPet, autoPetID, encodedPet, timeutil.Now(), bindingID, friend.qq)
 	}
 	finishFriendRefresh(db, bindingID, "completed", fmt.Sprintf("刷新完成，共处理 %d 位好友", count), "")
-}
-
-func refreshPetPKFriends(ctx context.Context, db *sql.DB, client interface { GetPetPKFriends(context.Context, int64, string) (json.RawMessage, error) }, bindingID, selfID int64) {
-	cursor := ""
-	seen := map[string]bool{}
-	count := 0
-	for page := 0; page < 100; page++ {
-		raw, err := client.GetPetPKFriends(ctx, selfID, cursor)
-		if err != nil { finishFriendRefresh(db, bindingID, "failed", "宠物好友目录获取失败", err.Error()); return }
-		var root map[string]any
-		if json.Unmarshal(raw, &root) != nil { finishFriendRefresh(db, bindingID, "failed", "宠物好友目录格式无效", string(raw)); return }
-		payload := root
-		if child, ok := root["data"].(map[string]any); ok { payload = child }
-		entries, _ := payload["friends"].([]any)
-		for _, entry := range entries {
-			friend, ok := entry.(map[string]any); if !ok { continue }
-			id := friendNumber(friend, "user_id", "friend_uin", "friend_id", "qq", "uin")
-			petID := strings.TrimSpace(fmt.Sprint(friend["pet_id"]))
-			if id < 1 || petID == "" { continue }
-			qq := strconv.FormatInt(id, 10); if seen[qq] { continue }; seen[qq] = true
-			nickname := strings.TrimSpace(fmt.Sprint(friend["nickname"]))
-			friendRaw, _ := json.Marshal(friend)
-			petRaw, _ := json.Marshal(friend)
-			_, err = db.ExecContext(ctx, `INSERT INTO qq_friends (qq_binding_id,friend_qq,nickname,has_pet,friend_data,pet_id,pet_data,updated_at) VALUES (?,?,?,1,?,?,?,?) ON CONFLICT(qq_binding_id,friend_qq) DO UPDATE SET nickname=excluded.nickname,has_pet=1,friend_data=excluded.friend_data,pet_id=excluded.pet_id,pet_data=excluded.pet_data,updated_at=excluded.updated_at`, bindingID, qq, nickname, string(friendRaw), petID, string(petRaw), timeutil.Now())
-			if err == nil { count++ }
-		}
-		next := strings.TrimSpace(fmt.Sprint(payload["next_cursor"]))
-		hasMore, _ := payload["has_more"].(bool)
-		if !hasMore || next == "" || next == cursor { break }; cursor = next
-	}
-	_, _ = db.ExecContext(ctx, "UPDATE qq_friend_refresh_states SET total_count=?,updated_at=? WHERE qq_binding_id=?", count, timeutil.Now(), bindingID)
-	finishFriendRefresh(db, bindingID, "completed", fmt.Sprintf("刷新完成，共获取 %d 位宠物好友", count), "")
 }
 
 func finishFriendRefresh(db *sql.DB, bindingID int64, status, message, refreshErr string) {
