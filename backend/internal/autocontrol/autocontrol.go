@@ -356,14 +356,13 @@ func (s *Scheduler) runBinding(parent context.Context, bindingID int64, qq strin
 		return
 	}
 	if reason, err := s.checkBindingReady(ctx, bindingID, qq); err != nil {
-		if errors.Is(err, errBindingPrecheckRetry) || errors.Is(err, errBindingLoginSync) {
-			s.record(bindingID, "precheck", "", "", false, reason, err.Error())
+		if errors.Is(err, errBindingPrecheckRetry) || errors.Is(err, errBindingLoginSync) || errors.Is(err, errBindingOffline) {
+			// A temporary disconnect must not clear the running story or plan item.
+			// Keeping them lets the next successful poll reconcile the in-flight activity.
+			s.record(bindingID, "precheck_retry", "", "", false, reason, err.Error())
 			return
 		}
 		s.disableBinding(bindingID, reason)
-		if errors.Is(err, errBindingOffline) {
-			s.notifyOffline(qq, reason)
-		}
 		return
 	}
 	if config.EncourageProbability < 0 || config.EncourageProbability > 100 {
@@ -856,7 +855,7 @@ func (s *Scheduler) checkBindingReady(ctx context.Context, bindingID int64, qq s
 	if withinLoginSyncGrace(updatedAt, timeutil.Current()) {
 		return "QQ 登录成功，等待在线状态同步", errBindingLoginSync
 	}
-	return "QQ 当前不在线，自动控制已关闭", errBindingOffline
+	return "QQ 当前不在线，自动控制等待恢复", errBindingOffline
 }
 
 func withinLoginSyncGrace(updatedAt string, now time.Time) bool {
