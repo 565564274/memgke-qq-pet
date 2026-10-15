@@ -233,13 +233,62 @@ func (c *Client) run(ctx context.Context) {
 		return
 	default:
 	}
-	c.setStatus("连接中", false, "")
-	c.publish("info", "connect_start", "正在连接听雨框架", nil)
-	if err := c.connect(ctx); err != nil {
-		c.setStatus("连接断开", false, err.Error())
-		c.log.Warn("mokant connection failed", "error", err)
-		c.publish("error", "connection_failed", "听雨框架连接失败，已停止重连", map[string]any{"error": err.Error()})
-		return
+	const initialRetryDelay = time.Second
+	const maximumRetryDelay = 30 * time.Second
+	attempt := 0
+	for {
+		if ctx.Err() != nil {
+			c.setStatus("已停止", false, "")
+			return
+		}
+		select {
+		case <-c.stop:
+			c.setStatus("已停止", false, "")
+			return
+		default:
+		}
+
+		c.setStatus("连接中", false, "")
+		c.publish("info", "connect_start", "正在连接听雨框架", map[string]any{"attempt": attempt + 1})
+		err := c.connect(ctx)
+		if ctx.Err() != nil {
+			c.setStatus("已停止", false, "")
+			return
+		}
+		select {
+		case <-c.stop:
+			c.setStatus("已停止", false, "")
+			return
+		default:
+		}
+		if err == nil {
+			continue
+		}
+
+		attempt++
+		delay := initialRetryDelay << min(attempt-1, 5)
+		if delay > maximumRetryDelay {
+			delay = maximumRetryDelay
+		}
+		c.setStatus("等待重连", false, err.Error())
+		c.log.Warn("mokant connection lost; retrying", "error", err, "attempt", attempt, "retry_in", delay)
+		c.publish("warning", "reconnect_scheduled", "听雨框架连接中断，将自动重连", map[string]any{"error": err.Error(), "attempt": attempt, "retry_in_seconds": int(delay.Seconds())})
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select { case <-timer.C: default: }
+			}
+			c.setStatus("已停止", false, "")
+			return
+		case <-c.stop:
+			if !timer.Stop() {
+				select { case <-timer.C: default: }
+			}
+			c.setStatus("已停止", false, "")
+			return
+		case <-timer.C:
+		}
 	}
 }
 

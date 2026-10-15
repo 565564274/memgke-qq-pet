@@ -26,7 +26,7 @@ import (
 var validActivities = map[string]bool{"school": true, "work": true, "adventure": true}
 
 var errBindingOffline = errors.New("QQ 当前不在线")
-var errBindingServiceCheck = errors.New("QQ 服务期限查询失败")
+var errBindingPrecheckRetry = errors.New("自动控制前置检查暂时失败")
 var errBindingLoginSync = errors.New("QQ 登录状态正在同步")
 
 const loginSyncGracePeriod = 45 * time.Second
@@ -153,15 +153,22 @@ type Log struct {
 }
 
 type Scheduler struct {
-	db       *sql.DB
-	client   *mokant.Client
-	log      *slog.Logger
-	mu       sync.Mutex
-	cancel   context.CancelFunc
-	done     chan struct{}
-	workers  map[int64]*bindingWorker
-	workerWG sync.WaitGroup
-	notifier Notifier
+	db         *sql.DB
+	client     *mokant.Client
+	log        *slog.Logger
+	mu         sync.Mutex
+	queryLogMu sync.Mutex
+	queryLogAt  map[queryLogKey]time.Time
+	cancel      context.CancelFunc
+	done        chan struct{}
+	workers     map[int64]*bindingWorker
+	workerWG    sync.WaitGroup
+	notifier    Notifier
+}
+
+type queryLogKey struct {
+	bindingID int64
+	action    string
 }
 
 type bindingWorker struct {
@@ -173,7 +180,7 @@ const startupRestoreBatchSize = 10
 const startupRestoreDelay = 5 * time.Second
 
 func NewScheduler(db *sql.DB, client *mokant.Client, logger *slog.Logger, notifier ...Notifier) *Scheduler {
-	scheduler := &Scheduler{db: db, client: client, log: logger, workers: make(map[int64]*bindingWorker)}
+	scheduler := &Scheduler{db: db, client: client, log: logger, workers: make(map[int64]*bindingWorker), queryLogAt: make(map[queryLogKey]time.Time)}
 	if len(notifier) > 0 {
 		scheduler.notifier = notifier[0]
 	}
@@ -349,7 +356,7 @@ func (s *Scheduler) runBinding(parent context.Context, bindingID int64, qq strin
 		return
 	}
 	if reason, err := s.checkBindingReady(ctx, bindingID, qq); err != nil {
-		if errors.Is(err, errBindingServiceCheck) || errors.Is(err, errBindingLoginSync) {
+		if errors.Is(err, errBindingPrecheckRetry) || errors.Is(err, errBindingLoginSync) {
 			s.record(bindingID, "precheck", "", "", false, reason, err.Error())
 			return
 		}
@@ -801,7 +808,7 @@ func (s *Scheduler) checkBindingReady(ctx context.Context, bindingID int64, qq s
 	var expiresAt string
 	var updatedAt string
 	if err := s.db.QueryRowContext(ctx, "SELECT COALESCE(service_expires_at, ''), updated_at FROM qq_bindings WHERE id = ?", bindingID).Scan(&expiresAt, &updatedAt); err != nil {
-		return "QQ 服务期限检查失败", fmt.Errorf("%w: %v", errBindingServiceCheck, err)
+		return "QQ 服务期限检查失败", fmt.Errorf("%w: %v", errBindingPrecheckRetry, err)
 	}
 	if strings.TrimSpace(expiresAt) != "" {
 		expires, err := time.Parse(time.RFC3339, expiresAt)
@@ -815,7 +822,7 @@ func (s *Scheduler) checkBindingReady(ctx context.Context, bindingID int64, qq s
 	botsData, err := s.client.ListBots(ctx)
 	if err != nil {
 		s.record(bindingID, "api_list_bots", "", "", false, "查询 QQ 在线状态失败", err.Error())
-		return "QQ 服务在线检查失败，自动控制已关闭", err
+		return "听雨服务暂时不可用，自动控制将在连接恢复后重试", fmt.Errorf("%w: %v", errBindingPrecheckRetry, err)
 	}
 	s.record(bindingID, "api_list_bots", "", "", true, "已查询 QQ 在线状态", string(botsData))
 	var raw any
@@ -1348,6 +1355,15 @@ func todaySummary(config Config) string {
 }
 
 func (s *Scheduler) record(bindingID int64, action, activity, option string, success bool, message, details string) {
+	if repetitiveQueryAction(action) {
+		if success {
+			if !s.shouldLogQuerySuccess(bindingID, action) {
+				return
+			}
+		} else {
+			s.resetQueryLogThrottle(bindingID, action)
+		}
+	}
 	now := timeutil.Now()
 	_, _ = s.db.Exec("INSERT INTO pet_auto_control_logs (qq_binding_id, action, activity, option_name, success, message, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", bindingID, action, activity, option, boolInt(success), message, details, now)
 	switch action {
@@ -1366,6 +1382,39 @@ func (s *Scheduler) record(bindingID int64, action, activity, option string, suc
 			_, _ = s.db.Exec("UPDATE pet_auto_control_states SET last_action = ?, last_error = ?, last_run_at = ?, updated_at = ? WHERE qq_binding_id = ?", action, detailsOrMessage(details, message), now, now, bindingID)
 		}
 	}
+}
+
+func (s *Scheduler) resetQueryLogThrottle(bindingID int64, action string) {
+	s.queryLogMu.Lock()
+	delete(s.queryLogAt, queryLogKey{bindingID: bindingID, action: action})
+	s.queryLogMu.Unlock()
+}
+
+func repetitiveQueryAction(action string) bool {
+	switch action {
+	case "api_get_pet_vitals", "api_get_pet_activity_status", "api_get_pet_profile", "api_list_bots":
+		return true
+	default:
+		return false
+	}
+}
+
+// Keep one successful heartbeat per query type and binding every 30 minutes.
+// Failures bypass this throttle, and a success after a failure is logged immediately.
+func (s *Scheduler) shouldLogQuerySuccess(bindingID int64, action string) bool {
+	key := queryLogKey{bindingID: bindingID, action: action}
+	now := timeutil.Current()
+	s.queryLogMu.Lock()
+	defer s.queryLogMu.Unlock()
+	if s.queryLogAt == nil {
+		s.queryLogAt = make(map[queryLogKey]time.Time)
+	}
+	last, ok := s.queryLogAt[key]
+	if ok && now.Sub(last) < 30*time.Minute {
+		return false
+	}
+	s.queryLogAt[key] = now
+	return true
 }
 
 func detailsOrMessage(details, message string) string {
